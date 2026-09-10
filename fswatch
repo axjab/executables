@@ -147,6 +147,7 @@ set -x
 watchexec \
     --watch-file "$watchfile" \
     --ignore '*.tmp' \
+    --ignore '*.bck' \
     --emit-events-to=json-stdio \
     --postpone \
     --debounce 1000ms \
