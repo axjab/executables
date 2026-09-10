@@ -1,9 +1,92 @@
 #!/bin/bash
+# ----- lumen -----
+# Unified brightness control: laptop panel via brightnessctl,
+# external monitors via ddcutil (VCP feature 10, luminosity).
+# Backend chosen from hostnamectl chassis type. Applies to
+# every monitor detected (1 or more). Verbose by default;
+# -q/-s silences informational output for automation use.
 
-# Wrapper for brightnessctl
+set -euo pipefail
 
-# TODO:
-# Add shortcuts to common subcommands
+QUIET=0
+RETRIES=3
+RETRY_DELAY=0.3
+LOCKFILE="${XDG_RUNTIME_DIR:-/tmp}/$(basename "$0").ddcutil.lock"
 
-echo "brightnessctl set $1%"
-brightnessctl set "$1%"
+# ----- helpers -----
+
+log() {
+    (( QUIET )) && return 0
+    printf '[brightness] %s\n' "$*" >&2
+}
+
+die() { printf 'brightness: %s\n' "$*" >&2; exit 1; }
+
+usage() { die "usage: $(basename "$0") [-q|-s] <0-100>"; }
+
+# ----- args -----
+
+while getopts ":qs" opt; do
+    case "$opt" in
+        q|s) QUIET=1 ;;
+        *)   usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+[[ $# -eq 1 ]] || usage
+LEVEL=$1
+[[ $LEVEL =~ ^[0-9]+$ && $LEVEL -ge 0 && $LEVEL -le 100 ]] || die "level must be an integer 0-100"
+
+# ----- detection -----
+
+CHASSIS=$(hostnamectl -j 2>/dev/null | jq -r '.Chassis // empty') || CHASSIS=""
+[[ -n $CHASSIS ]] || die "could not determine chassis via hostnamectl"
+log "chassis: $CHASSIS"
+
+# ----- backends -----
+
+set_laptop() {
+    log "brightnessctl set ${LEVEL}%"
+    brightnessctl set "${LEVEL}%" >/dev/null
+}
+
+set_external() {
+    local displays
+    displays=$(ddcutil detect --brief 2>/dev/null | awk '/^Display [0-9]+/{print $2}') || true
+    [[ -n $displays ]] || die "no ddcutil-detected displays"
+
+    # ddcutil does not reliably tolerate concurrent access to the
+    # same I2C bus (e.g. two lumen invocations from rapid key repeats).
+    # Serialize with a short-timeout lock rather than let them race.
+    exec {lock_fd}>"$LOCKFILE"
+    flock -w 2 "$lock_fd" || die "another brightness update is in progress"
+
+    local d attempt fail=0
+    for d in $displays; do
+        attempt=0
+        until ddcutil -d "$d" setvcp 10 "$LEVEL" >/dev/null 2>&1; do
+            attempt=$((attempt + 1))
+            log "display $d: setvcp failed (attempt $attempt/$RETRIES)"
+            if (( attempt >= RETRIES )); then
+                echo "brightness: display $d failed after $RETRIES attempts" >&2
+                fail=1
+                break
+            fi
+            sleep "$RETRY_DELAY"
+        done
+        if (( attempt < RETRIES )); then
+            log "display $d -> ${LEVEL}%"
+        fi
+    done
+
+    (( fail )) && return 1
+    return 0
+}
+
+# ----- dispatch -----
+
+case "$CHASSIS" in
+    laptop|convertible|tablet|handset) set_laptop ;;
+    *)                                 set_external ;;
+esac

@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# INTERFACE FOR DEVICE BRIGHTNESS CONTROL
+#
+# External monitors require:
+# ddcutil -d <monitor-id> set 10 <brightness 0-100>
+#
+# Laptops simply use brightnessctl set <0-100>%
+#
+# This interface reconciles them and detects the
+# monitor type. Example of detection using hostnamectl:
+#  hostnamectl -j
+# {
+# 	"Hostname" : "xenon",
+# 	"StaticHostname" : "xenon",
+# 	"PrettyHostname" : null,
+# 	"DefaultHostname" : "localhost",
+# 	"HostnameSource" : "static",
+# 	"IconName" : "computer",
+# 	"Chassis" : "desktop",
+# 	"ChassisAssetTag" : "To be filled by O.E.M.",
+# 	"Deployment" : "production",
+# 	"Location" : "home-lab",
+# 	"KernelName" : "Linux",
+# 	"MachineInformationData" : [
+# 		"ICON_NAME=computer",
+# 		"CHASSIS=desktop",
+# 		"DEPLOYMENT=production",
+# 		"LOCATION=home-lab",
+# 		"MY_CUSTOM_FIELD=hello",
+# 		"HOST_ROLE=gaming",
+# 		"HAS_GPU=yes",
+# 		"COFFEE_MACHINE=false",
+# 		"TAGS=bar:baz:foo:gaming:tag2:tag3"
+# 	]
+# 
+# Use ----- <label> ------ for separators
+
+# Requirements:
+# 1. Must be fast and ergonomic, no prompts
+# 2. Include verbose mode for debugging
+# 3. Sometimes, ddcutil fails, try again in that case
+# 4. Assume brightness is applied to ALL monitors at once, i may have one or two
+
+echo "brightnessctl set $1%"
+brightnessctl set "$1%"
