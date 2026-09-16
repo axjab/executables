@@ -19,7 +19,7 @@ ICON=$'\U000f00e0'   # nf-md-brightness_7 (󰃠)
 
 log() {
     (( QUIET )) && return 0
-    printf '[brightness] %s\n' "$*" >&2
+    printf '%s\n' "$*" >&2
 }
 
 die() { printf 'brightness: %s\n' "$*" >&2; exit 1; }
@@ -31,6 +31,25 @@ usage: $(basename "$0") [-q|-s] <0-100>
        $(basename "$0") -h          show this help
 EOF
     exit "${1:-1}"
+}
+
+get_chassis_symbol() {
+    case "$1" in
+        laptop) echo "" ;;         # Font Awesome: fa-laptop
+        convertible) echo "󰍺" ;;    # Material Design Icons: mdi-laptop-chromebook (often implies 2-in-1)
+        tablet) echo "" ;;         # Font Awesome: fa-tablet
+        handset) echo "  フォン" ;;    # Font Awesome: fa-mobile
+        desktop) echo "" ;;        # Font Awesome: fa-desktop
+        server) echo "" ;;         # Font Awesome: fa-server
+        vm) echo "󰍳" ;;            # Material Design Icons: mdi-cloud (representing virtualized environments)
+        container) echo "󰍴" ;;       # Material Design Icons: mdi-box
+        embedded) echo "󰍵" ;;      # Material Design Icons: mdi-chip
+        watch) echo "󰍶" ;;         # Material Design Icons: mdi-watch
+        tv) echo "󰍷" ;;            # Material Design Icons: mdi-tv
+        appliance) echo "󰍸" ;;     # Material Design Icons: mdi-router
+        pc) echo "" ;;             # Font Awesome: fa-desktop (often used interchangeably with desktop)
+        *) echo "󰍹" ;;             # Material Design Icons: mdi-help-circle-outline (for unknown chassis types)
+    esac
 }
 
 # ----- args -----
@@ -50,11 +69,11 @@ if [[ $# -eq 1 ]]; then
     [[ $LEVEL =~ ^[0-9]+$ && $LEVEL -ge 0 && $LEVEL -le 100 ]] || usage 1
 fi
 
-# ----- detection -----
+# ----- chassis detection -----
 
 CHASSIS=$(hostnamectl -j 2>/dev/null | jq -r '.Chassis // empty') || CHASSIS=""
 [[ -n $CHASSIS ]] || die "could not determine chassis via hostnamectl"
-log "chassis: $CHASSIS"
+log "$(get_chassis_symbol $CHASSIS) $CHASSIS"
 
 # ----- read current -----
 

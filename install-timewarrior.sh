@@ -28,7 +28,7 @@ cd "timew-${VERSION}"
 echo "Building..."
 cmake .
 make -j$(nproc)
-make install
+sudo make install
 
 echo "Cleaning up..."
 cd ..
