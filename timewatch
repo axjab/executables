@@ -1,1 +1,1 @@
-watch -b -t -w -n 0.5 'tw week ; tw summary 4d ago'
+watch -b -t -w -n 0.5 'tw week ; tw summary :no-annotations 4d ago'

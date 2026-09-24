@@ -1,0 +1,17 @@
+#!/bin/bash
+
+# Define your modes
+HIGH_HZ="1920x1080@120.035"
+LOW_HZ="1920x1080@48.014"
+OUTPUT="eDP-1"
+
+# Get current power status
+status=$(cat /sys/class/power_supply/BAT*/status)
+
+if [ "$status" = "Discharging" ]; then
+    wlr-randr --output "$OUTPUT" --mode "$LOW_HZ"
+    echo "Switched to battery mode: $LOW_HZ"
+else
+    wlr-randr --output "$OUTPUT" --mode "$HIGH_HZ"
+    echo "Switched to plugged-in mode: $HIGH_HZ"
+fi

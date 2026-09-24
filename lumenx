@@ -2,8 +2,7 @@
 # ----- lumen -----
 # Unified brightness control: laptop panel via brightnessctl,
 # external monitors via ddcutil (VCP feature 10, luminosity).
-# Uses kernel sysfs fingerprinting for instant caching with 
-# automatic hot-plug self-healing (additions/removals).
+# Automatically detects and controls ALL connected displays.
 # Verbose by default; -q/-s silences informational output.
 # No args: print current brightness for all displays and exit.
 
@@ -13,9 +12,6 @@ QUIET=0
 RETRIES=3
 RETRY_DELAY=0.3
 LOCKFILE="${XDG_RUNTIME_DIR:-/tmp}/$(basename "$0").ddcutil.lock"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/lumen"
-CACHE_FP="$CACHE_DIR/fingerprint"
-CACHE_DISPLAYS="$CACHE_DIR/displays"
 ICON=$'\U000f00e0'    # nf-md-brightness_7 (󰃠)
 
 # ----- helpers -----
@@ -72,44 +68,15 @@ if [[ $# -eq 1 ]]; then
     [[ $LEVEL =~ ^[0-9]+$ && $LEVEL -ge 0 && $LEVEL -le 100 ]] || usage 1
 fi
 
-# ----- hardware detection & fast sysfs fingerprint caching -----
+# ----- hardware detection helpers -----
 
 has_laptop() {
     command -v brightnessctl &>/dev/null && brightnessctl -m &>/dev/null && [[ -n $(brightnessctl -m 2>/dev/null) ]]
 }
 
-generate_fingerprint() {
-    local fp=""
-    for s in /sys/class/drm/*/status; do
-        [[ -f "$s" ]] || continue
-        fp+="$(basename "$(dirname "$s")")=$(< "$s");"
-    done
-    printf '%s' "$fp"
-}
-
 get_external_displays() {
     command -v ddcutil &>/dev/null || return 0
-
-    local current_fp
-    current_fp=$(generate_fingerprint)
-
-    # Instant cache hit if kernel drm fingerprint matches
-    if [[ -f "$CACHE_FP" && -f "$CACHE_DISPLAYS" && $(< "$CACHE_FP") == "$current_fp" ]]; then
-        cat "$CACHE_DISPLAYS"
-        return 0
-    fi
-
-    # Cache miss or hot-plug event (monitor added/removed): re-detect
-    log "display topology changed; rescanning via ddcutil..."
-    local ext_displays
-    ext_displays=$(ddcutil detect --brief 2>/dev/null | awk '/^Display [0-9]+/{print $2}') || true
-
-    # Update cache and fingerprint atomically/silently
-    mkdir -p "$CACHE_DIR" 2>/dev/null || true
-    printf '%s' "$current_fp" > "$CACHE_FP" 2>/dev/null || true
-    printf '%s\n' "$ext_displays" > "$CACHE_DISPLAYS" 2>/dev/null || true
-
-    printf '%s\n' "$ext_displays"
+    ddcutil detect --brief 2>/dev/null | awk '/^Display [0-9]+/{print $2}'
 }
 
 # Optional chassis log if available

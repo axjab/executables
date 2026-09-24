@@ -1,46 +1,151 @@
 #!/bin/bash
+# ----- lumen -----
+# Unified brightness control: laptop panel via brightnessctl,
+# external monitors via ddcutil (VCP feature 10, luminosity).
+# Backend chosen from hostnamectl chassis type. Applies to
+# every monitor detected (1 or more). Verbose by default;
+# -q/-s silences informational output for automation use.
+# No args: print current brightness and exit.
 
-# INTERFACE FOR DEVICE BRIGHTNESS CONTROL
-#
-# External monitors require:
-# ddcutil -d <monitor-id> set 10 <brightness 0-100>
-#
-# Laptops simply use brightnessctl set <0-100>%
-#
-# This interface reconciles them and detects the
-# monitor type. Example of detection using hostnamectl:
-#  hostnamectl -j
-# {
-# 	"Hostname" : "xenon",
-# 	"StaticHostname" : "xenon",
-# 	"PrettyHostname" : null,
-# 	"DefaultHostname" : "localhost",
-# 	"HostnameSource" : "static",
-# 	"IconName" : "computer",
-# 	"Chassis" : "desktop",
-# 	"ChassisAssetTag" : "To be filled by O.E.M.",
-# 	"Deployment" : "production",
-# 	"Location" : "home-lab",
-# 	"KernelName" : "Linux",
-# 	"MachineInformationData" : [
-# 		"ICON_NAME=computer",
-# 		"CHASSIS=desktop",
-# 		"DEPLOYMENT=production",
-# 		"LOCATION=home-lab",
-# 		"MY_CUSTOM_FIELD=hello",
-# 		"HOST_ROLE=gaming",
-# 		"HAS_GPU=yes",
-# 		"COFFEE_MACHINE=false",
-# 		"TAGS=bar:baz:foo:gaming:tag2:tag3"
-# 	]
-# 
-# Use ----- <label> ------ for separators
+set -euo pipefail
 
-# Requirements:
-# 1. Must be fast and ergonomic, no prompts
-# 2. Include verbose mode for debugging
-# 3. Sometimes, ddcutil fails, try again in that case
-# 4. Assume brightness is applied to ALL monitors at once, i may have one or two
+QUIET=0
+RETRIES=3
+RETRY_DELAY=0.3
+LOCKFILE="${XDG_RUNTIME_DIR:-/tmp}/$(basename "$0").ddcutil.lock"
+ICON=$'\U000f00e0'   # nf-md-brightness_7 (󰃠)
 
-echo "brightnessctl set $1%"
-brightnessctl set "$1%"
+# ----- helpers -----
+
+log() {
+    (( QUIET )) && return 0
+    printf '%s\n' "$*" >&2
+}
+
+die() { printf 'brightness: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat >&2 <<EOF
+usage: $(basename "$0") [-q|-s] <0-100>
+       $(basename "$0")             show current brightness
+       $(basename "$0") -h          show this help
+EOF
+    exit "${1:-1}"
+}
+
+get_chassis_symbol() {
+    case "$1" in
+        laptop) echo "" ;;         # Font Awesome: fa-laptop
+        convertible) echo "󰍺" ;;    # Material Design Icons: mdi-laptop-chromebook (often implies 2-in-1)
+        tablet) echo "" ;;         # Font Awesome: fa-tablet
+        handset) echo "  フォン" ;;    # Font Awesome: fa-mobile
+        desktop) echo "" ;;        # Font Awesome: fa-desktop
+        server) echo "" ;;         # Font Awesome: fa-server
+        vm) echo "󰍳" ;;            # Material Design Icons: mdi-cloud (representing virtualized environments)
+        container) echo "󰍴" ;;       # Material Design Icons: mdi-box
+        embedded) echo "󰍵" ;;      # Material Design Icons: mdi-chip
+        watch) echo "󰍶" ;;         # Material Design Icons: mdi-watch
+        tv) echo "󰍷" ;;            # Material Design Icons: mdi-tv
+        appliance) echo "󰍸" ;;     # Material Design Icons: mdi-router
+        pc) echo "" ;;             # Font Awesome: fa-desktop (often used interchangeably with desktop)
+        *) echo "󰍹" ;;             # Material Design Icons: mdi-help-circle-outline (for unknown chassis types)
+    esac
+}
+
+# ----- args -----
+
+while getopts ":qsh" opt; do
+    case "$opt" in
+        q|s) QUIET=1 ;;
+        h)   usage 0 ;;
+        *)   usage 1 ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+(( $# <= 1 )) || usage 1
+if [[ $# -eq 1 ]]; then
+    LEVEL=$1
+    [[ $LEVEL =~ ^[0-9]+$ && $LEVEL -ge 0 && $LEVEL -le 100 ]] || usage 1
+fi
+
+# ----- chassis detection -----
+
+CHASSIS=$(hostnamectl -j 2>/dev/null | jq -r '.Chassis // empty') || CHASSIS=""
+[[ -n $CHASSIS ]] || die "could not determine chassis via hostnamectl"
+log "$(get_chassis_symbol $CHASSIS) $CHASSIS"
+
+# ----- read current -----
+
+get_laptop() {
+    local pct
+    pct=$(brightnessctl -m | awk -F, '{gsub("%","",$4); print $4}')
+    [[ -n $pct ]] || die "brightnessctl: could not read current brightness"
+    printf '%s %s%%\n' "$ICON" "$pct"
+}
+
+get_external() {
+    local d
+    d=$(ddcutil detect --brief 2>/dev/null | awk '/^Display [0-9]+/{print $2; exit}') || true
+    [[ -n $d ]] || die "no ddcutil-detected displays"
+
+    local cur max
+    read -r cur max < <(ddcutil -d "$d" getvcp 10 --brief 2>/dev/null | awk '{print $4, $5}')
+    [[ -n ${cur:-} && -n ${max:-} && $max -gt 0 ]] || die "ddcutil: could not read current brightness"
+    printf '%s %s%%\n' "$ICON" "$(( cur * 100 / max ))"
+}
+
+# ----- write backends -----
+
+set_laptop() {
+    log "brightnessctl set ${LEVEL}%"
+    brightnessctl set "${LEVEL}%" >/dev/null
+}
+
+set_external() {
+    local displays
+    displays=$(ddcutil detect --brief 2>/dev/null | awk '/^Display [0-9]+/{print $2}') || true
+    [[ -n $displays ]] || die "no ddcutil-detected displays"
+
+    # ddcutil does not reliably tolerate concurrent access to the
+    # same I2C bus (e.g. two lumen invocations from rapid key repeats).
+    # Serialize with a short-timeout lock rather than let them race.
+    exec {lock_fd}>"$LOCKFILE"
+    flock -w 2 "$lock_fd" || die "another brightness update is in progress"
+
+    local d attempt fail=0
+    for d in $displays; do
+        attempt=0
+        until ddcutil -d "$d" setvcp 10 "$LEVEL" >/dev/null 2>&1; do
+            attempt=$((attempt + 1))
+            log "display $d: setvcp failed (attempt $attempt/$RETRIES)"
+            if (( attempt >= RETRIES )); then
+                echo "brightness: display $d failed after $RETRIES attempts" >&2
+                fail=1
+                break
+            fi
+            sleep "$RETRY_DELAY"
+        done
+        if (( attempt < RETRIES )); then
+            log "display $d -> ${LEVEL}%"
+        fi
+    done
+
+    (( fail )) && return 1
+    return 0
+}
+
+# ----- dispatch -----
+
+if [[ -z ${LEVEL:-} ]]; then
+    case "$CHASSIS" in
+        laptop|convertible|tablet|handset) get_laptop ;;
+        *)                                 get_external ;;
+    esac
+    exit 0
+fi
+
+case "$CHASSIS" in
+    laptop|convertible|tablet|handset) set_laptop ;;
+    *)                                 set_external ;;
+esac
