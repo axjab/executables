@@ -1,0 +1,395 @@
+#!/usr/bin/env bash
+# cal — ergonomic extension of chroncal (events) and taskdog (todos).
+# Anything not defined here passes straight through to chroncal.
+#
+#   cal                        menu
+#   cal new [title…]           create an event: title, then toggle only the fields you want to change
+#   cal edit [id|query]        update an event: pick it, toggle fields; current values stay visible
+#   cal list [from] [to]       compact event list (default: today .. +14d)
+#   cal todo [taskdog args…]   no args = taskdog list (priority-sorted); output capped at 15 lines
+#   cal <anything else>        -> chroncal <anything else>   (e.g. cal event get 42 -o json)
+#
+# NATS: if the `nats` CLI exists, event create/update publish JSON to
+# cal.event.{created,updated} (todo mutations: cal.todo.command) at $NATS_URL
+# (default nats://localhost:4222). Best effort: never blocks or fails a command.
+set -euo pipefail
+shopt -s inherit_errexit
+
+NATS_URL=${NATS_URL:-nats://localhost:4222}
+TODO_MAX_LINES=15
+
+# ── JSON field guesses (the ONLY place to touch if chroncal uses other keys) ──
+JQ_NORM='if type=="array" then .[0] else (.event // .) end'
+JQ_ID='.id // .uid // empty'
+JQ_TITLE='.summary // .title // ""'
+JQ_START='.start // .dtstart // .start_time // ""'
+JQ_END='.end // .dtend // .end_time // ""'
+JQ_CATS='.categories | if type=="array" then join(",") else (. // "") end'
+JQ_RRULE='.rrule // .recurrence_rule // ""'
+JQ_CAL='.calendar // .calendar_name // ""'
+JQ_STATUS='.status // ""'
+
+RE_TIME='^([01][0-9]|2[0-3]):[0-5][0-9]$'
+RE_DUR='^([0-9]+h)?([0-9]+m)?$'
+RE_ISO_DATE='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+RE_REL='^([+-][0-9]+[dwm]|today|tomorrow|yesterday|(next )?(monday|tuesday|wednesday|thursday|friday|saturday|sunday))$'
+RE_ALARM='^([A-Za-z]+:)?[-+]?P([0-9]+[WD])?(T([0-9]+[HMS])+)?$'
+
+declare -A F=() CHG=()   # F = form values, CHG = fields touched (edit mode)
+ARGS=() CUR='' EDIT=''
+ERRF=$(mktemp)
+trap 'rc=$?; rm -f "$ERRF"; if ((rc == 130)); then echo "Cancelled." >&2; fi; exit "$rc"' EXIT
+
+# ── plumbing ──────────────────────────────────────────────────────────────────
+info() { gum log -l info "$*" >&2; }
+warn() { gum log -l warn "$*" >&2; }
+die()  { gum log -l error "$*" >&2; exit 1; }
+
+need() {
+  local c
+  for c in "$@"; do
+    command -v "$c" >/dev/null || { echo "cal: missing dependency: $c" >&2; exit 1; }
+  done
+}
+
+trim() { local s=$1; s=${s#"${s%%[![:space:]]*}"}; s=${s%"${s##*[![:space:]]}"}; printf '%s' "$s"; }
+
+passthrough() { rm -f "$ERRF"; need chroncal; exec chroncal "$@"; }
+
+# Run chroncal with JSON output: stdout on success, stderr surfaced on failure.
+cc() {
+  local out
+  if ! out=$(chroncal "$@" -o json 2>"$ERRF"); then
+    warn "chroncal $1 $2 failed: $(<"$ERRF")"
+    return 1
+  fi
+  printf '%s' "$out"
+}
+
+jid() { jq -r "($JQ_NORM) | ($JQ_ID)" 2>/dev/null || true; }
+
+# Read a value from the event being edited ($CUR); empty when unknown.
+cur() { jq -r "($1) // \"\"" <<<"${CUR:-null}" 2>/dev/null || true; }
+cur_start() { local ts; ts=$(cur "$JQ_START"); if [[ -n $ts ]]; then date -d "$ts" "+$1" 2>/dev/null || true; fi; }
+cur_span() { # current duration as 1h30m / 45m, or empty
+  local a b secs h m
+  a=$(cur "$JQ_START"); b=$(cur "$JQ_END")
+  [[ -n $a && -n $b ]] || return 0
+  secs=$(( $(date -d "$b" +%s 2>/dev/null || echo 0) - $(date -d "$a" +%s 2>/dev/null || echo 0) ))
+  ((secs > 0)) || return 0
+  h=$((secs / 3600)); m=$((secs % 3600 / 60))
+  if ((h && m)); then printf '%dh%dm' "$h" "$m"; elif ((h)); then printf '%dh' "$h"; else printf '%dm' "$m"; fi
+}
+
+# publish <topic> <action> [json] — best effort; needs only the nats CLI.
+publish() {
+  command -v nats >/dev/null || return 0
+  local payload
+  payload=$(jq -cn --arg a "$2" --argjson d "${3:-null}" '{action:$a, at:(now|todate), data:$d}' 2>/dev/null) \
+    || payload=$(jq -cn --arg a "$2" '{action:$a, at:(now|todate)}')
+  NATS_URL="$NATS_URL" timeout 3 nats pub "$1" "$payload" >/dev/null 2>&1 || true
+}
+
+# ── prompting ─────────────────────────────────────────────────────────────────
+# ask <header> <default> <validator|-> <req|opt>  — loops until valid; Esc/Ctrl-C aborts.
+ask() {
+  local v
+  while :; do
+    v=$(gum input --header "$1" --value "$2" --width 70 --char-limit 0) || exit 130
+    v=$(trim "$v")
+    if [[ -z $v ]]; then
+      [[ $4 == opt ]] && return 0
+      warn "Required."; continue
+    fi
+    if [[ $3 == - ]] || "$3" "$v"; then printf '%s' "$v"; return 0; fi
+  done
+}
+
+v_date() {
+  local v=${1,,}
+  if [[ $v =~ $RE_ISO_DATE ]]; then
+    [[ $(date -d "$v" +%F 2>/dev/null) == "$v" ]] || { warn "Not a real date: $v"; return 1; }
+  elif ! [[ $v =~ $RE_REL ]]; then
+    warn "Use YYYY-MM-DD, today, tomorrow, a weekday, 'next friday', +3d, -2w, +1m"; return 1
+  fi
+}
+v_time()   { [[ $1 =~ $RE_TIME ]] || { warn "Use 24h HH:MM, e.g. 09:30"; return 1; }; }
+v_posint() { [[ $1 =~ ^[1-9][0-9]*$ ]] || { warn "Enter a positive number"; return 1; }; }
+v_rrule()  { [[ $1 =~ ^FREQ= ]] || { warn "RRULE must start with FREQ="; return 1; }; }
+v_alarm()  { [[ $1 =~ $RE_ALARM && $1 =~ [0-9] ]] || { warn "e.g. -PT45M, -P1D, EMAIL:-PT1H"; return 1; }; }
+v_span() {
+  local start=${F[Time]:-}
+  if [[ $1 =~ $RE_TIME ]]; then
+    if [[ -n $start && ! $1 > $start ]]; then
+      warn "End must be after start ($start); use a duration to cross midnight"; return 1
+    fi
+  elif ! [[ $1 =~ $RE_DUR && -n $1 ]]; then
+    warn "Use 30m, 1h30m, or an end time HH:MM"; return 1
+  fi
+}
+v_emails() {
+  local e; local -a list
+  IFS=, read -ra list <<<"$1"
+  for e in "${list[@]}"; do
+    [[ $e =~ ^[^@]+@[^@]+\.[^@]+$ ]] || { warn "Invalid address: $e"; return 1; }
+  done
+}
+
+# Value-returning pickers (print the chosen value; run inside $(...)).
+p_alarm() {
+  local s out='' sel
+  local -a opts=("(keep as is)" "At start" "10 min before" "30 min before" "1 hour before" "1 day before" "Custom…")
+  local -A trig=(["At start"]=PT0S ["10 min before"]=-PT10M ["30 min before"]=-PT30M ["1 hour before"]=-PT1H ["1 day before"]=-P1D)
+  sel=$(gum choose --no-limit --header "Reminders (space = toggle, enter = confirm; replaces existing)" "${opts[@]}") || exit 130
+  while IFS= read -r s <&3; do
+    case $s in
+      "") ;;
+      "(keep as is)") printf '%s' "${F[Reminders]:-}"; return 0 ;;
+      Custom*) out+=$(ask "Trigger [ACTION:]ISO-8601, e.g. -PT45M or EMAIL:-P1D" "" v_alarm req)$'\n' ;;
+      *) out+=${trig[$s]}$'\n' ;;
+    esac
+  done 3<<<"$sel"
+  printf '%s' "${out%$'\n'}"
+}
+p_repeat() {
+  local c n rule
+  c=$(gum choose --header "Repeat" Daily Weekly "Weekdays (Mon-Fri)" Monthly Yearly "Custom RRULE") || exit 130
+  case $c in
+    Daily)     rule="FREQ=DAILY" ;;
+    Weekly)    rule="FREQ=WEEKLY" ;;
+    Weekdays*) rule="FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR" ;;
+    Monthly)   rule="FREQ=MONTHLY" ;;
+    Yearly)    rule="FREQ=YEARLY" ;;
+    *) ask "RRULE (e.g. FREQ=WEEKLY;BYDAY=MO,WE)" "${F[Repeat]:-}" v_rrule req; return 0 ;;
+  esac
+  n=$(ask "Stop after N occurrences (blank = never)" "" v_posint opt)
+  if [[ -n $n ]]; then rule+=";COUNT=$n"; fi
+  printf '%s' "$rule"
+}
+calendars() {
+  chroncal calendar list -o json 2>/dev/null \
+    | jq -r 'if type=="array" then .[] else (.calendars // [])[] end | (.name // .Name // empty)' 2>/dev/null || true
+}
+p_calendar() {
+  local names c; names=$(calendars)
+  if [[ -n $names ]]; then c=$(gum choose --header Calendar <<<"$names") || exit 130
+  else c=$(ask "Calendar name" "${F[Calendar]:-}" - req); fi
+  printf '%s' "$c"
+}
+
+# ── form: the heart of new/edit ───────────────────────────────────────────────
+next_hour() { date -d '+1 hour' +%H:00; }
+
+init_new() { # <title>
+  EDIT=''; CHG=()
+  F=([Title]="$1" [Date]=today [Type]=Timed [Time]="$(next_hour)" [Duration]=1h)
+}
+
+init_edit() {
+  EDIT=1; CHG=()
+  F=([Title]="$(cur "$JQ_TITLE")" [Date]="$(cur_start %F)" [Location]="$(cur .location)"
+     [Description]="$(cur .description)" [Categories]="$(cur "$JQ_CATS")" [Repeat]="$(cur "$JQ_RRULE")"
+     [Status]="$(cur "$JQ_STATUS")" [Calendar]="$(cur "$JQ_CAL")")
+  if [[ $(cur "$JQ_START") == *T* || -z $(cur "$JQ_START") ]]; then
+    F[Type]=Timed; F[Time]=$(cur_start %H:%M); F[Duration]=$(cur_span)
+  else
+    F[Type]=All-day
+  fi
+}
+
+fields() {
+  local -a f=(Title Date)
+  if [[ -z $EDIT ]]; then f+=(Type); fi
+  if [[ ${F[Type]:-Timed} == Timed ]]; then f+=(Time Duration); else f+=(LastDay); fi
+  f+=(Location Description Categories Reminders Repeat Attendees Status Calendar)
+  printf '%s\n' "${f[@]}"
+}
+
+rows() { # one "Field   value" row per field; edited fields get a marker
+  local k v m
+  while read -r k; do
+    v=${F[$k]:-}; v=${v//$'\n'/, }; m=''
+    if [[ -n $EDIT && -n ${CHG[$k]:-} ]]; then m=' ✎'; fi
+    printf '%-12s %s%s\n' "$k" "${v:-—}" "$m"
+  done < <(fields)
+}
+
+set_field() {
+  local k=$1 v
+  case $k in
+    Type)
+      if [[ ${F[Type]} == Timed ]]; then F[Type]=All-day; F[Time]=''; F[Duration]=''
+      else F[Type]=Timed; F[LastDay]=''; F[Time]=$(next_hour); F[Duration]=1h; fi
+      return 0 ;;
+    Title)       v=$(ask "Title" "${F[Title]:-}" - req) ;;
+    Date)        v=$(ask "Date (today, tomorrow, friday, next monday, +3d, 2026-10-20)" "${F[Date]:-today}" v_date req); v=${v,,} ;;
+    Time)        v=$(ask "Start time (HH:MM, 24h)" "${F[Time]:-}" v_time req) ;;
+    Duration)    v=$(ask "Duration (30m, 1h30m) or end time (HH:MM)" "${F[Duration]:-1h}" v_span req) ;;
+    LastDay)     v=$(ask "Last day of a multi-day event" "${F[LastDay]:-}" v_date opt); v=${v,,} ;;
+    Location|Description) v=$(ask "$k" "${F[$k]:-}" - opt) ;;
+    Categories)  v=$(ask "Categories (comma-separated)" "${F[Categories]:-}" - opt) ;;
+    Reminders)   v=$(p_alarm) ;;
+    Repeat)      v=$(p_repeat) ;;
+    Attendees)   v=$(ask "Attendees, comma-separated (email or Name <email>; editing replaces all)" "${F[Attendees]:-}" v_emails opt) ;;
+    Status)      v=$(gum choose --header Status CONFIRMED TENTATIVE CANCELLED) || exit 130 ;;
+    Calendar)    v=$(p_calendar) ;;
+    *)           return 0 ;;
+  esac
+  F[$k]=$v; CHG[$k]=1
+}
+
+validate_form() {
+  [[ -n ${F[Title]:-} && -n ${F[Date]:-} ]] || { warn "Title and date are required"; return 1; }
+  if [[ ${F[Type]:-Timed} == Timed && -n ${F[Duration]:-} ]]; then v_span "${F[Duration]}" || return 1; fi
+}
+
+# form <header> <done-label>: toggle fields (space), enter edits them in turn, then the
+# menu returns with resolved values shown. Enter with nothing toggled = the first row = done.
+form() {
+  local sel row k finished
+  while :; do
+    sel=$(gum choose --no-limit --height 18 --header "$1" <<<"$(printf '▶ %s\n' "$2"; rows)") || exit 130
+    finished=''
+    if [[ -z $sel ]]; then finished=1; fi
+    while IFS= read -r row <&3; do
+      [[ -n $row ]] || continue
+      k=${row%% *}
+      if [[ $k == "▶" ]]; then finished=1; continue; fi
+      set_field "$k"
+    done 3<<<"$sel"
+    if [[ -n $finished ]] && validate_form; then return 0; fi
+  done
+}
+
+want() { if [[ -n $EDIT ]]; then [[ -n ${CHG[$1]:-} ]]; else [[ -n ${F[$1]:-} ]]; fi; }
+emit() { if want "$1"; then ARGS+=("$2" "${F[$1]:-}"); fi; }
+
+build_args() { # form state -> chroncal flags (new: every filled field; edit: only touched ones)
+  local l e; local -a list
+  ARGS=()
+  if [[ -n $EDIT ]]; then emit Title --title; fi
+  emit Date --date; emit Time --time
+  if want Duration; then
+    if [[ ${F[Duration]} =~ $RE_TIME ]]; then ARGS+=(--end-time "${F[Duration]}"); else ARGS+=(--duration "${F[Duration]}"); fi
+  fi
+  emit LastDay --end-date; emit Location --location; emit Description --description
+  emit Categories --categories; emit Repeat --rrule; emit Status --status; emit Calendar --calendar
+  if want Reminders; then
+    while IFS= read -r l; do if [[ -n $l ]]; then ARGS+=(--alarm "$l"); fi; done <<<"${F[Reminders]:-}"
+  fi
+  if want Attendees; then
+    IFS=, read -ra list <<<"${F[Attendees]:-}"
+    for e in "${list[@]}"; do ARGS+=(--attendee "$(trim "$e")"); done
+  fi
+}
+
+# Show the exact command, confirm, run, announce, publish.
+commit() { # <topic> <action> <chroncal args…>
+  local topic=$1 action=$2 res; shift 2
+  gum style --border rounded --border-foreground 212 --padding "0 1" "$(printf '%q ' chroncal "$@")"
+  gum confirm "Run it?" || { info "Aborted — nothing changed."; return 0; }
+  res=$(cc "$@") || return 1
+  info "✓ $action event ${res:+$(jid <<<"$res")}"
+  publish "$topic" "$action" "$res"
+}
+
+pick_event() { # [query] -> numeric ID (compact text is the documented stable picker format)
+  local rows line id
+  if [[ -n ${1:-} ]]; then rows=$(chroncal event search "$1" --compact --no-header) || die "Search failed"
+  else rows=$(chroncal event list --from=-7d --to=+60d --compact --no-header) || die "Could not list events"; fi
+  [[ -n $rows ]] || die "No matching events"
+  line=$(gum filter --height 15 --placeholder "Type to filter events…" <<<"$rows") || exit 130
+  read -r id _ <<<"$line"
+  [[ $id =~ ^[0-9]+$ ]] || die "Could not read an event ID from: $line"
+  printf '%s' "$id"
+}
+
+# ── commands ──────────────────────────────────────────────────────────────────
+cmd_new() {
+  need chroncal gum jq
+  local dupes
+  init_new "$*"
+  if [[ -z ${F[Title]} ]]; then F[Title]=$(ask "Title" "" - req); fi
+  form "New event — space toggles fields to change; enter with none toggled creates it" "Create event"
+  build_args
+
+  dupes=$(chroncal event search "${F[Title]}" --from "${F[Date]}" --to "${F[Date]}" -o json 2>/dev/null \
+    | jq 'if type=="array" then length else 0 end' 2>/dev/null || true)
+  if (( ${dupes:-0} > 0 )); then
+    gum confirm "${dupes} event(s) with a similar title already exist on ${F[Date]}. Create anyway?" || { info "Aborted."; return 0; }
+  fi
+  commit cal.event.created created event add "${F[Title]}" "${ARGS[@]}"
+}
+
+cmd_edit() {
+  need chroncal gum jq
+  local id=${1:-}
+  if ! [[ $id =~ ^[0-9]+$ ]]; then id=$(pick_event "$id"); fi
+  CUR=$(cc event get "$id") || return 1
+  CUR=$(jq -c "$JQ_NORM" <<<"$CUR")
+  init_edit
+  if [[ -n ${F[Repeat]} ]]; then warn "Recurring series — changes apply to the whole series."; fi
+  form "Edit #$id — space toggles fields to change; ✎ marks edited ones" "Review changes"
+  build_args
+  if ((${#ARGS[@]} == 0)); then info "Nothing to change."; return 0; fi
+  commit cal.event.updated updated event update "$id" "${ARGS[@]}"
+}
+
+cmd_list() {
+  need chroncal gum
+  local from=${1:-today} to=${2:-+14d}
+  v_date "$from" && v_date "$to" || exit 1
+  chroncal event list --from="$from" --to="$to" --compact --show-weekday
+}
+
+td() { # taskdog, output capped (captured, so no SIGPIPE games under pipefail)
+  local out rc=0
+  out=$(taskdog "$@" 2>&1) || rc=$?
+  if [[ -n $out ]]; then head -n "$TODO_MAX_LINES" <<<"$out"; fi
+  return "$rc"
+}
+
+cmd_todo() {
+  need taskdog
+  if (($# == 0)); then
+    td list -f id,status,planned_start,planned_end,name,tags --sort priority
+    return
+  fi
+  if [[ $1 == tui ]]; then taskdog "$@"; return; fi
+  td "$@"
+  case $1 in
+    list|ls|show|get|view) ;;
+    *) publish cal.todo.command command \
+         "$(printf '%s\0' "$@" | jq -Rsc 'split("\u0000")[:-1] | {args: .}')" ;;
+  esac
+}
+
+menu() {
+  need gum
+  local c; c=$(gum choose --header "cal" "New event" "Edit event" "List events" "Todos" "Calendar TUI" Quit) || exit 130
+  case $c in
+    "New event")    cmd_new ;;
+    "Edit event")   cmd_edit ;;
+    "List events")  cmd_list ;;
+    Todos)          cmd_todo ;;
+    "Calendar TUI") passthrough ;;
+  esac
+}
+
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}"; }
+
+main() {
+  local cmd=${1:-menu}
+  if (($#)); then shift; fi
+  case $cmd in
+    new)       cmd_new "$@" ;;
+    edit)      cmd_edit "$@" ;;
+    list)      cmd_list "$@" ;;
+    todo)      cmd_todo "$@" ;;
+    menu)      menu ;;
+    -h|--help) usage ;;
+    help)      if (($#)); then passthrough help "$@"; else usage; fi ;;
+    *)         passthrough "$cmd" "$@" ;;
+  esac
+}
+main "$@"
