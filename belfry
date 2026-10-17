@@ -1,6 +1,0 @@
-#!/bin/bash
-
-# proof of concept reminders CLI
-
-touch /tmp/belfry
-cat /tmp/belfry

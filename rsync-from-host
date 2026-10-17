@@ -1,8 +1,0 @@
-# Source - https://stackoverflow.com/a
-# Posted by johnsyweb, modified by community. See post 'Timeline' for change history
-# Retrieved 2026-01-10, License - CC BY-SA 4.0
-
-echo "source: $1 from HOST"
-echo "dest: $2"
-
-rsync -chavzP --stats ash@firelink:$1 $2
