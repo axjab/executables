@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+#
+# bindmnt — permanently bind-mount SOURCE onto TARGET via /etc/fstab. No prompts.
+#
+#   bindmnt [options] SOURCE TARGET
+#
+# Options:
+#   -r, --ro         read-only
+#   -R, --rbind      recursive (include submounts of SOURCE)
+#   -N, --no-nofail  omit "nofail" (boot waits/fails if SOURCE is missing)
+#   -o, --opts OPTS  extra comma-separated mount options (e.g. noexec,nosuid)
+#   -m, --mount      afterwards run: systemctl daemon-reload && mount -av
+#   -n, --dry-run    only print the fstab line, change nothing
+#   -h, --help
+#
+# Idempotent: re-running with an identical entry is a no-op (still mounts with -m).
+# Target is created if missing. /etc/fstab is backed up before every change.
+
+set -euo pipefail
+
+FSTAB=/etc/fstab
+RO=0 RBIND=0 NOFAIL=1 MOUNT=0 DRY=0 EXTRA=""
+POS=()
+
+usage() { sed -n '3,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+die()   { echo "bindmnt: $*" >&2; exit 1; }
+
+while (($#)); do
+  case $1 in
+    -r|--ro)        RO=1 ;;
+    -R|--rbind)     RBIND=1 ;;
+    -N|--no-nofail) NOFAIL=0 ;;
+    -o|--opts)      shift; [[ $# -gt 0 ]] || die "--opts needs a value"; EXTRA=$1 ;;
+    -m|--mount)     MOUNT=1 ;;
+    -n|--dry-run)   DRY=1 ;;
+    -h|--help)      usage; exit 0 ;;
+    --)             shift; POS+=("$@"); break ;;
+    -?*)            die "unknown option: $1 (see --help)" ;;
+    *)              POS+=("$1") ;;
+  esac
+  shift
+done
+
+[[ ${#POS[@]} -eq 2 ]] || { usage >&2; exit 2; }
+
+[[ -d ${POS[0]} ]] || die "source '${POS[0]}' is not a directory"
+SRC=$(realpath -e -- "${POS[0]}")
+TGT=$(realpath -m -- "${POS[1]}")
+
+[[ $SRC != "$TGT" ]] || die "source and target are the same"
+case "$TGT/" in "$SRC"/*) die "target is inside source (would loop)" ;; esac
+case "$SRC/" in "$TGT"/*) die "source is inside target (would be hidden)" ;; esac
+
+esc() { local p=$1; p=${p//\\/\\134}; p=${p// /\\040}; p=${p//$'\t'/\\011}; printf '%s' "$p"; }
+
+OPTS=bind
+((RBIND))  && OPTS=rbind
+((RO))     && OPTS+=,ro
+((NOFAIL)) && OPTS+=,nofail
+[[ -z $EXTRA ]] || OPTS+=,$EXTRA
+
+E_SRC=$(esc "$SRC"); E_TGT=$(esc "$TGT")
+LINE="$E_SRC $E_TGT none $OPTS 0 0"
+
+if ((DRY)); then
+  echo "$LINE"
+  exit 0
+fi
+
+if [[ $EUID -eq 0 ]]; then SUDO=(); else SUDO=(sudo); fi
+
+# Existing entry for this target?
+existing=$(awk -v t="$E_TGT" '$0 !~ /^[[:space:]]*#/ && $2 == t' "$FSTAB" || true)
+add=1
+if [[ -n $existing ]]; then
+  if [[ $existing == "$LINE" ]]; then
+    echo "already in $FSTAB: $LINE"
+    add=0
+  else
+    echo "bindmnt: $FSTAB already has an entry for $TGT:" >&2
+    echo "  $existing" >&2
+    die "remove or edit it first"
+  fi
+fi
+
+if ((add)); then
+  [[ -d $TGT ]] || "${SUDO[@]}" mkdir -p -- "$TGT"
+  [[ -z $(ls -A -- "$TGT") ]] || echo "bindmnt: note: $TGT is not empty; its contents are hidden while mounted" >&2
+
+  bdir=/etc; [[ -d /var/backups ]] && bdir=/var/backups
+  backup="$bdir/fstab.$(date +%Y%m%d-%H%M%S).bak"
+  "${SUDO[@]}" cp -a -- "$FSTAB" "$backup"
+
+  # make sure the file ends in a newline before appending
+  nl=""; [[ -z $(tail -c1 "$FSTAB") ]] || nl=$'\n'
+  printf '%s%s\n' "$nl" "$LINE" | "${SUDO[@]}" tee -a "$FSTAB" >/dev/null
+  echo "added: $LINE  (backup: $backup)"
+fi
+
+if ((MOUNT)); then
+  if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+    "${SUDO[@]}" systemctl daemon-reload
+  fi
+  "${SUDO[@]}" mount -av
+else
+  echo "not mounted yet: sudo systemctl daemon-reload && sudo mount -av   (or re-run with -m)"
+fi
