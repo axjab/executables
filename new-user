@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+#
+# add-ns-user.sh — interactively create a user for a filesystem namespace.
+#
+# Prompts (via charmbracelet/gum) for:
+#   - username
+#   - home directory (typed, or picked with a file browser; created with sudo if missing)
+#   - SSH alias
+#   - description (GECOS field of /etc/passwd)
+#   - login shell (selection list, from /etc/shells)
+# then creates the user and prints a ready-to-paste SSH config entry.
+#
+# Environment overrides:
+#   SSH_HOSTNAME   value for "Hostname" in the SSH entry (default: hostname -f)
+#   DEFAULT_BASE   directory used as starting point / suggestion for homes (default: /data)
+#   DEFAULT_SHELL  preferred default shell (default: /bin/bash)
+#
+# Requires: gum (https://github.com/charmbracelet/gum), useradd, getent, sudo (unless root)
+
+set -euo pipefail
+
+DEFAULT_BASE="${DEFAULT_BASE:-/data}"
+DEFAULT_SHELL="${DEFAULT_SHELL:-/bin/bash}"
+ACCENT=212
+
+CREATED_HOME=0
+
+# ---------------------------------------------------------------- helpers ---
+
+warn() { gum style --foreground 214 "! $*" >&2; }
+die()  { gum style --foreground 196 "✗ $*" >&2; exit 1; }
+ok()   { gum style --foreground 42  "✓ $*" >&2; }
+
+trap 'echo >&2; warn "Aborted."; exit 130' INT
+
+command -v gum >/dev/null 2>&1 \
+  || { echo "gum is required: https://github.com/charmbracelet/gum#installation" >&2; exit 1; }
+# Note: useradd lives in /usr/sbin, which is often not in a normal user's PATH;
+# sudo's secure_path finds it, so we don't check for it here.
+
+if [[ $EUID -eq 0 ]]; then
+  SUDO=()
+else
+  command -v sudo >/dev/null 2>&1 || die "sudo is required when not running as root"
+  SUDO=(sudo)
+fi
+
+# ---------------------------------------------------------------- prompts ---
+
+prompt_username() {
+  local name
+  while true; do
+    name=$(gum input --header "Username" \
+                     --placeholder "e.g. dufs" \
+                     --char-limit 32) || exit 130
+    if [[ ! $name =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+      warn "Invalid name: use lowercase letters, digits, '_' or '-', starting with a letter or '_'."
+    elif getent passwd "$name" >/dev/null; then
+      warn "User '$name' already exists."
+    else
+      printf '%s' "$name"
+      return
+    fi
+  done
+}
+
+prompt_home() {
+  local username=$1 mode home start
+  while true; do
+    mode=$(gum choose --header "Home directory for '$username'" \
+                      "Type a path" "Browse existing directories") || exit 130
+
+    if [[ $mode == Browse* ]]; then
+      start=$DEFAULT_BASE
+      [[ -d $start ]] || start=/
+      gum style --foreground 244 \
+        "↑/↓ move · → open directory · enter select · esc cancel" >&2
+      home=$(gum file --directory --height 15 "$start") || continue
+      if [[ ! -d $home ]]; then
+        warn "'$home' is not a directory."
+        continue
+      fi
+    else
+      home=$(gum input --header "Home path" \
+                       --value "${DEFAULT_BASE%/}/$username" \
+                       --width 60) || exit 130
+    fi
+
+    home=${home%/}
+    if [[ ! $home =~ ^/[^:[:space:]]+$ ]]; then
+      warn "Use an absolute path without spaces or ':'."
+      continue
+    fi
+    printf '%s' "$home"
+    return
+  done
+}
+
+prompt_alias() {
+  local username=$1 alias
+  while true; do
+    alias=$(gum input --header "SSH alias" \
+                      --value "$username" \
+                      --placeholder "Host alias used in ~/.ssh/config") || exit 130
+    if [[ $alias =~ ^[A-Za-z0-9._-]+$ ]]; then
+      printf '%s' "$alias"
+      return
+    fi
+    warn "Alias may only contain letters, digits, '.', '_' and '-'."
+  done
+}
+
+prompt_description() {
+  local desc
+  while true; do
+    desc=$(gum input --header "Description (GECOS)" \
+                     --placeholder "e.g. File server" \
+                     --width 60) || exit 130
+    if [[ $desc == *:* || $desc == *[[:cntrl:]]* ]]; then
+      warn "Description must not contain ':' or control characters."
+    else
+      printf '%s' "$desc"
+      return
+    fi
+  done
+}
+
+prompt_shell() {
+  local -a shells=()
+  local s default=""
+
+  while IFS= read -r s; do
+    [[ -x $s ]] && shells+=("$s")
+  done < <(grep -vE '^[[:space:]]*(#|$)' /etc/shells | awk '!seen[$0]++')
+
+  # nologin is a sensible choice for service accounts even if not listed
+  for s in /usr/sbin/nologin /sbin/nologin; do
+    if [[ -x $s ]] && [[ ! " ${shells[*]} " == *" $s "* ]]; then
+      shells+=("$s")
+      break
+    fi
+  done
+
+  [[ ${#shells[@]} -gt 0 ]] || die "No usable shells found in /etc/shells"
+
+  for s in "$DEFAULT_SHELL" /bin/bash /usr/bin/bash; do
+    if [[ " ${shells[*]} " == *" $s "* ]]; then default=$s; break; fi
+  done
+  [[ -n $default ]] || default=${shells[0]}
+
+  gum choose --header "Login shell" \
+             --selected "$default" \
+             --height 10 \
+             "${shells[@]}" || exit 130
+}
+
+# ------------------------------------------------------------------- main ---
+
+gum style --bold --foreground "$ACCENT" --border rounded --border-foreground "$ACCENT" \
+  --padding "0 2" "New namespace user" >&2
+
+USERNAME=$(prompt_username)
+HOME_DIR=$(prompt_home "$USERNAME")
+ALIAS=$(prompt_alias "$USERNAME")
+DESCRIPTION=$(prompt_description)
+LOGIN_SHELL=$(prompt_shell)
+SSH_HOST=${SSH_HOSTNAME:-$(hostname -f 2>/dev/null || hostname)}
+
+# Summary & confirmation
+gum style --border rounded --border-foreground 244 --padding "0 2" \
+"$(printf '%-12s %s\n' \
+    "Username:"    "$USERNAME" \
+    "Home:"        "$HOME_DIR$([[ -d $HOME_DIR ]] || echo '  (will be created)')" \
+    "Alias:"       "$ALIAS" \
+    "Description:" "${DESCRIPTION:-<none>}" \
+    "Shell:"       "$LOGIN_SHELL")" >&2
+
+gum confirm "Create this user?" || { warn "Nothing done."; exit 0; }
+
+# Cache sudo credentials up front so later prompts aren't hidden
+if [[ $EUID -ne 0 ]]; then
+  "${SUDO[@]}" -v || die "sudo authentication failed"
+fi
+
+# Home directory
+if [[ ! -d $HOME_DIR ]]; then
+  gum confirm "'$HOME_DIR' does not exist. Create it with sudo?" \
+    || die "A home directory is required."
+  "${SUDO[@]}" mkdir -p -- "$HOME_DIR"
+  CREATED_HOME=1
+fi
+
+# User (and matching private group, like the dufs example: uid == gid)
+useradd_args=(useradd
+  --home-dir "$HOME_DIR"
+  --no-create-home
+  --comment "$DESCRIPTION"
+  --shell "$LOGIN_SHELL")
+
+if getent group "$USERNAME" >/dev/null; then
+  useradd_args+=(--gid "$USERNAME")
+else
+  useradd_args+=(--user-group)
+fi
+useradd_args+=("$USERNAME")
+
+"${SUDO[@]}" "${useradd_args[@]}"
+ok "User '$USERNAME' created."
+
+# Ownership of the home directory
+if [[ $CREATED_HOME -eq 1 ]]; then
+  "${SUDO[@]}" chown "$USERNAME:$USERNAME" -- "$HOME_DIR"
+  "${SUDO[@]}" chmod 750 -- "$HOME_DIR"
+  ok "Created $HOME_DIR (owner $USERNAME:$USERNAME, mode 750)."
+elif gum confirm --default=false "'$HOME_DIR' already exists. Make $USERNAME its owner (chown, non-recursive)?"; then
+  "${SUDO[@]}" chown "$USERNAME:$USERNAME" -- "$HOME_DIR"
+  ok "Ownership of $HOME_DIR set to $USERNAME:$USERNAME."
+fi
+
+# Show the resulting /etc/passwd entry
+gum style --foreground 244 "/etc/passwd:" >&2
+getent passwd "$USERNAME" >&2
+
+# SSH config entry (plain text on stdout so it can be piped or copied)
+gum style --foreground "$ACCENT" --bold "SSH config entry:" >&2
+printf 'Host %s\n  Hostname %s\n  User %s\n' "$ALIAS" "$SSH_HOST" "$USERNAME"
