@@ -1,0 +1,390 @@
+#!/usr/bin/env bash
+# tty-notify — broadcast an attention signal to every accessible local PTY.
+#
+# Design:
+#   * No login/session database: enumerate /dev/pts directly (works for SSH and
+#     terminal tabs that `who`/`wall` cannot see).
+#   * Never execute or interpret message text: remove terminal control codes.
+#   * Every write runs in a time-limited child, so a stalled PTY cannot hang us.
+#   * No resident process or messaging transport. Invoke from NATS, cron, etc.
+#
+# Requires: Bash 4+, standard GNU coreutils, util-linux flock (only for optional
+# suppression policies). Linux /dev/pts. No tmux or graphical environment.
+set -uo pipefail
+
+# ── Configuration: defaults can be adjusted here. ────────────────────────────
+DEFAULT_LEVEL=info
+DEFAULT_WRITE_TIMEOUT=1             # Seconds per PTY; may be fractional.
+DEFAULT_DEDUPE_SECONDS=0            # 0 disables duplicate suppression.
+DEFAULT_RATE_LIMIT=''               # E.g. 5/60 (five deliveries per minute).
+MAX_MESSAGE_BYTES=8192              # Reject larger messages, never truncate.
+MAX_LINE_WIDTH=72                   # Keep notices legible in narrow terminals.
+STATE_ROOT="${XDG_RUNTIME_DIR:-${XDG_CACHE_HOME:-${HOME:-/tmp}/.cache}}"
+STATE_DIR="${STATE_ROOT}/tty-notify"
+VERSION=1.0.0
+
+# ── Runtime options and counters. ────────────────────────────────────────────
+LEVEL=$DEFAULT_LEVEL
+WRITE_TIMEOUT=$DEFAULT_WRITE_TIMEOUT
+DEDUPE_SECONDS=$DEFAULT_DEDUPE_SECONDS
+RATE_LIMIT=$DEFAULT_RATE_LIMIT
+FORCE_BELL=''                       # Empty means severity-dependent default.
+SYSTEM_WIDE=0
+DRY_RUN=0
+LIST_ONLY=0
+QUIET=0
+NO_COLOR_MODE=0
+MESSAGE=''
+DELIVERED=0
+FAILED=0
+STATE_FAILED=0
+TARGETS=()
+
+usage() {
+  cat <<'HELP'
+Usage: tty-notify [OPTIONS] MESSAGE...
+       command | tty-notify [OPTIONS]
+
+Broadcast to EVERY writable PTY on this host owned by the current user.
+Unlike wall, this works without login records and inside ordinary terminal tabs.
+
+Options:
+  -l, --level LEVEL       info | warning | critical (default: info)
+  -b, --bell              Sound/flash terminal bell (if enabled by terminal)
+      --no-bell           Suppress bell, including critical's default bell
+      --no-color          Disable ANSI styling (also honors NO_COLOR)
+      --system            Root only: include other users' writable PTYs
+      --timeout SEC       Maximum time for each PTY write (default: 1)
+      --dedupe SEC        Suppress matching recently delivered messages
+      --rate-limit N/SEC  Limit broadcasts in a rolling interval (e.g. 5/60)
+      --dry-run           List targets and preview message; do not deliver
+      --list              List eligible PTYs (no message required)
+  -q, --quiet             Suppress success summary; errors still shown
+  -h, --help              Display help
+      --version           Display version
+
+Examples:
+  tty-notify 'Prayer time'
+  tty-notify -l warning 'Meeting in five minutes'
+  tty-notify -l critical 'Immediate attention required'
+  printf 'Line one\nLine two\n' | tty-notify --bell
+  tty-notify --dry-run 'Preview only'
+
+Exit codes: 0 = delivered (or deliberately suppressed); 1 = failed/partial
+            delivery, no eligible PTYs, or unavailable state; 2 = invalid input.
+
+Notes:
+  * A critical message rings by default. --no-bell overrides this.
+  * Dedupe/rate limiting are OFF by default, including for critical messages.
+  * Terminal delivery is not human acknowledgment. PTY output can disturb TUIs.
+  * PTYs on OTHER hosts need a separate invocation (e.g. from NATS).
+HELP
+}
+
+fail_usage() { printf 'tty-notify: %s\n' "$*" >&2; exit 2; }
+warn()       { printf 'tty-notify: %s\n' "$*" >&2; }
+
+is_uint()    { [[ $1 =~ ^[0-9]+$ ]]; }
+is_seconds() { [[ $1 =~ ^([0-9]+)(\.[0-9]+)?$ ]] && [[ $1 =~ [1-9] ]]; }
+
+parse_args() {
+  while (($#)); do
+    case $1 in
+      -l|--level)       (($# >= 2)) || fail_usage 'missing --level value'; LEVEL=$2; shift 2 ;;
+      -b|--bell)        FORCE_BELL=1; shift ;;
+      --no-bell)        FORCE_BELL=0; shift ;;
+      --no-color)       NO_COLOR_MODE=1; shift ;;
+      --system)         SYSTEM_WIDE=1; shift ;;
+      --timeout)        (($# >= 2)) || fail_usage 'missing --timeout value'; WRITE_TIMEOUT=$2; shift 2 ;;
+      --dedupe)         (($# >= 2)) || fail_usage 'missing --dedupe value'; DEDUPE_SECONDS=$2; shift 2 ;;
+      --rate-limit)     (($# >= 2)) || fail_usage 'missing --rate-limit value'; RATE_LIMIT=$2; shift 2 ;;
+      --dry-run)        DRY_RUN=1; shift ;;
+      --list)           LIST_ONLY=1; shift ;;
+      -q|--quiet)       QUIET=1; shift ;;
+      -h|--help)        usage; exit 0 ;;
+      --version)        printf 'tty-notify %s\n' "$VERSION"; exit 0 ;;
+      --)               shift; break ;;
+      -*)               fail_usage "unknown option: $1" ;;
+      *)                break ;;
+    esac
+  done
+  # Remaining tokens are literal message text, including words after --.
+  if (($#)); then
+    MESSAGE="$*"
+  elif (( ! LIST_ONLY )); then
+    [[ ! -t 0 ]] || fail_usage 'provide a message or pipe one into stdin'
+    MESSAGE=$(head -c "$((MAX_MESSAGE_BYTES + 1))")
+  fi
+}
+
+validate_options() {
+  case $LEVEL in info|warning|critical) ;; *) fail_usage 'level must be info, warning or critical' ;; esac
+  is_seconds "$WRITE_TIMEOUT" || fail_usage '--timeout must be greater than zero'
+  is_uint "$DEDUPE_SECONDS" || fail_usage '--dedupe must be a nonnegative integer'
+  # Prefix 10# makes user-supplied 08 decimal, rather than octal.
+  DEDUPE_SECONDS=$((10#$DEDUPE_SECONDS))
+  if [[ -n $RATE_LIMIT ]]; then
+    [[ $RATE_LIMIT =~ ^([0-9]+)/([0-9]+)$ ]] || fail_usage '--rate-limit must be N/SECONDS'
+    RATE_COUNT=$((10#${BASH_REMATCH[1]}))
+    RATE_SECONDS=$((10#${BASH_REMATCH[2]}))
+    (( RATE_COUNT > 0 && RATE_SECONDS > 0 )) || fail_usage 'rate limit must be positive'
+  fi
+  if (( SYSTEM_WIDE )) && (( EUID != 0 )); then
+    fail_usage '--system requires root privileges'
+  fi
+  if [[ -z $FORCE_BELL ]]; then
+    [[ $LEVEL == critical ]] && FORCE_BELL=1 || FORCE_BELL=0
+  fi
+}
+
+check_message_size() {
+  local bytes
+  bytes=$(printf '%s' "$MESSAGE" | wc -c)
+  (( bytes <= MAX_MESSAGE_BYTES )) || fail_usage "message exceeds $MAX_MESSAGE_BYTES bytes"
+  [[ -n ${MESSAGE//[$'\n\t ']/} ]] || fail_usage 'message is empty'
+}
+
+# Remove escape/control characters so messages cannot issue terminal commands,
+# change titles, paste into shells, or spoof formatting. Keep UTF-8 and newlines.
+sanitize_message() {
+  local cp encoded char
+  MESSAGE=${MESSAGE//$'\t'/    }
+  MESSAGE=$(printf '%s' "$MESSAGE" | LC_ALL=C tr -d '\000-\011\013-\037\177')
+  # Unicode C1 controls and bidi overrides are not needed in an alert.
+  for ((cp=128; cp<=159; cp++)); do
+    printf -v encoded '\\U%08x' "$cp"
+    printf -v char '%b' "$encoded"
+    MESSAGE=${MESSAGE//"$char"/}
+  done
+  for cp in 8206 8207 8234 8235 8236 8237 8238 8294 8295 8296 8297; do
+    printf -v encoded '\\U%08x' "$cp"
+    printf -v char '%b' "$encoded"
+    MESSAGE=${MESSAGE//"$char"/}
+  done
+}
+
+# /dev/pts entries exist for live PTYs; do NOT trust `who` for discovery.
+# Symlinks and directories fail the -c test; test ownership unless --system.
+discover_targets() {
+  local p
+  TARGETS=()
+  for p in /dev/pts/[0-9]*; do
+    [[ -c $p && -w $p ]] || continue
+    if (( ! SYSTEM_WIDE )) && [[ ! -O $p ]]; then continue; fi
+    TARGETS+=("$p")
+  done
+}
+
+terminal_columns() {
+  local size rows cols
+  size=$(stty -F "$1" size 2>/dev/null) || { printf '80'; return; }
+  read -r rows cols <<< "$size"
+  if [[ $cols =~ ^[0-9]+$ ]] && (( cols >= 20 )); then
+    printf '%s' "$cols"
+  else
+    printf '80'
+  fi
+}
+
+list_targets() {
+  local p cols
+  printf 'Eligible PTYs: %s\n' "${#TARGETS[@]}"
+  for p in "${TARGETS[@]}"; do
+    cols=$(terminal_columns "$p")
+    printf '  %-18s %s columns\n' "$p" "$cols"
+  done
+}
+
+setup_style() {
+  local locale_name=${LC_ALL:-${LC_CTYPE:-${LANG:-}}}
+  RESET='' BOLD='' TINT='' RULE='-' DOT='!'
+  TOP_LEFT='+' BOTTOM_LEFT='+' VERT='|' SEP='|'
+  if [[ ${locale_name,,} == *utf-8* || ${locale_name,,} == *utf8* ]]; then
+    RULE='━' DOT='●' TOP_LEFT='┏' BOTTOM_LEFT='┗' VERT='┃' SEP='•'
+  fi
+  if (( ! NO_COLOR_MODE )) && [[ ! -v NO_COLOR ]] && [[ -n ${TERM:-} && ${TERM:-} != dumb ]]; then
+    RESET=$'\033[0m'
+    BOLD=$'\033[1m'
+    case $LEVEL in
+      info)     TINT=$'\033[36m' ;;
+      warning)  TINT=$'\033[1;33m' ;;
+      critical) TINT=$'\033[1;31m' ;;
+    esac
+  fi
+}
+
+# Append to PAYLOAD using CRLF, which is safer with PTYs in raw/TUI mode.
+append_line() { PAYLOAD+="$1"$'\r\n'; }
+
+append_message_body() {
+  local line segment width=$1
+  # fold is locale-aware and wraps at word boundaries when possible.
+  while IFS= read -r line || [[ -n $line ]]; do
+    if [[ -z $line ]]; then
+      append_line "$VERT"
+      continue
+    fi
+    while IFS= read -r segment || [[ -n $segment ]]; do
+      append_line "$VERT  $segment"
+    done < <(printf '%s\n' "$line" | fold -s -w "$width")
+  done <<< "$MESSAGE"
+}
+
+build_payload() {
+  local p=$1 cols width now host border
+  cols=$(terminal_columns "$p")
+  width=$((cols - 5))
+  (( width > MAX_LINE_WIDTH )) && width=$MAX_LINE_WIDTH
+  (( width < 15 )) && width=15
+  now=$(date '+%H:%M:%S')
+  host=$(hostname -s 2>/dev/null || printf '%s' "${HOSTNAME:-host}")
+  printf -v border '%*s' "$((width + 4))" ''
+  border=${border// /$RULE}
+
+  PAYLOAD=$'\r\n'
+  append_line "${TINT}${BOLD}${TOP_LEFT}${border}${RESET}"
+  append_line "${TINT}${BOLD}${VERT} $DOT ${LEVEL^^}  $SEP  $now  $SEP  $host${RESET}"
+  append_line "${TINT}${VERT}${RESET}"
+  append_message_body "$width"
+  append_line "${TINT}${VERT}${RESET}"
+  append_line "${TINT}${BOLD}${BOTTOM_LEFT}${border}${RESET}"
+  (( FORCE_BELL )) && PAYLOAD=$'\a'"$PAYLOAD"
+}
+
+# The child process receives data as positional arguments, NOT executable code.
+# GNU timeout terminates it if opening/writing to a PTY gets stuck.
+send_to_pty() {
+  local p=$1 payload=$2
+  timeout --kill-after=0.2s "$WRITE_TIMEOUT" \
+    bash -c 'printf "%s" "$1" > "$2"' _ "$payload" "$p" \
+    </dev/null >/dev/null 2>/dev/null
+}
+
+# Optional policy state is per-user. flock makes simultaneous calls atomic.
+# If policy storage is unavailable, FAIL CLOSED: don't silently bypass an
+# explicitly requested suppression policy. With policies disabled, no I/O.
+open_state() {
+  (( DEDUPE_SECONDS > 0 )) || [[ -n $RATE_LIMIT ]] || return 0
+  (umask 077; mkdir -p -- "$STATE_DIR") || { warn 'cannot create policy state directory'; return 1; }
+  [[ -d $STATE_DIR && -O $STATE_DIR ]] || { warn 'policy state is not owned by current user'; return 1; }
+  exec {STATE_FD}>"$STATE_DIR/lock" || { warn 'cannot open policy lock'; return 1; }
+  flock -w 5 "$STATE_FD" || { warn 'policy lock timed out'; return 1; }
+}
+
+close_state() {
+  if [[ -n ${STATE_FD:-} ]]; then
+    flock -u "$STATE_FD"
+    exec {STATE_FD}>&-
+  fi
+}
+
+message_key() {
+  printf '%s\0%s' "$LEVEL" "$MESSAGE" | sha256sum | cut -d ' ' -f 1
+}
+
+is_duplicate() {
+  (( DEDUPE_SECONDS > 0 )) || return 1
+  local previous=0
+  [[ -f $STATE_DIR/dedupe-$KEY ]] && read -r previous < "$STATE_DIR/dedupe-$KEY"
+  [[ $previous =~ ^[0-9]+$ ]] || previous=0
+  (( NOW >= previous && NOW - previous < DEDUPE_SECONDS ))
+}
+
+read_rate_history() {
+  local ts
+  RECENT=()
+  [[ -f $STATE_DIR/rate-$RATE_SECONDS ]] || return 0
+  while IFS= read -r ts; do
+    [[ $ts =~ ^[0-9]+$ ]] || continue
+    (( ts <= NOW && NOW - ts < RATE_SECONDS )) && RECENT+=("$ts")
+  done < "$STATE_DIR/rate-$RATE_SECONDS"
+}
+
+is_rate_limited() {
+  [[ -n $RATE_LIMIT ]] || return 1
+  read_rate_history
+  (( ${#RECENT[@]} >= RATE_COUNT ))
+}
+
+record_success() {
+  local ts
+  if (( DEDUPE_SECONDS > 0 )); then
+    if ! printf '%s\n' "$NOW" > "$STATE_DIR/dedupe-$KEY"; then
+      warn 'unable to save dedupe state'
+      STATE_FAILED=1
+    fi
+  fi
+  if [[ -n $RATE_LIMIT ]]; then
+    { for ts in "${RECENT[@]}"; do printf '%s\n' "$ts"; done; printf '%s\n' "$NOW"; } \
+      > "$STATE_DIR/rate-$RATE_SECONDS" || { warn 'unable to save rate state'; STATE_FAILED=1; }
+  fi
+}
+
+broadcast() {
+  local p
+  for p in "${TARGETS[@]}"; do
+    # Recheck in case this PTY closed or was reassigned after discovery.
+    [[ -c $p && -w $p ]] || { ((++FAILED)); warn "unavailable: $p"; continue; }
+    if (( ! SYSTEM_WIDE )) && [[ ! -O $p ]]; then
+      ((++FAILED)); warn "ownership changed: $p"; continue
+    fi
+    build_payload "$p"
+    if send_to_pty "$p" "$PAYLOAD"; then
+      ((++DELIVERED))
+    else
+      ((++FAILED))
+      warn "delivery failed or timed out: $p"
+    fi
+  done
+}
+
+main() {
+  local suppression=''
+  parse_args "$@"
+  validate_options
+  discover_targets
+  if (( LIST_ONLY )); then list_targets; return 0; fi
+  check_message_size
+  sanitize_message
+  check_message_size
+  setup_style
+
+  if (( DRY_RUN )); then
+    list_targets
+    printf '\nPreview (bell suppressed):\n'
+    FORCE_BELL=0
+    build_payload /dev/null
+    printf '%s' "$PAYLOAD"
+    return 0
+  fi
+  if (( ${#TARGETS[@]} == 0 )); then
+    warn 'no writable PTYs found (use --list to diagnose)'
+    return 1
+  fi
+
+  if (( DEDUPE_SECONDS > 0 )) || [[ -n $RATE_LIMIT ]]; then
+    open_state || return 1
+    NOW=$(date +%s)
+    KEY=$(message_key)
+    if is_duplicate; then
+      suppression='duplicate'
+    elif is_rate_limited; then
+      suppression='rate limit'
+    fi
+  fi
+  if [[ -n $suppression ]]; then
+    (( QUIET )) || printf 'Suppressed (%s).\n' "$suppression"
+    close_state
+    return 0
+  fi
+
+  broadcast
+  if (( DELIVERED > 0 )) && { (( DEDUPE_SECONDS > 0 )) || [[ -n $RATE_LIMIT ]]; }; then
+    record_success
+  fi
+  close_state
+  (( QUIET )) || printf 'tty-notify: delivered=%d failed=%d\n' "$DELIVERED" "$FAILED"
+  (( DELIVERED > 0 && FAILED == 0 && STATE_FAILED == 0 ))
+}
+
+main "$@"
