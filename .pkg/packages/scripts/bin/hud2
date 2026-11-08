@@ -1,0 +1,12 @@
+#!/bin/bash
+
+z="\e[0m"
+r="\e[33m"
+b="\e[34m"
+m="\e[35m"
+
+echo "This is a concept of my status bar / HUD"
+
+echo -e "water    ▕${b}🬋🬋🬋🬋🬋🬋🬋🬋🬋${z}"
+echo -e "hunger   ▕${r}🬋🬋🬋🬋🬋🬋🬋🬋🬋🬋🬋🬋🬋🬋${z}"
+echo -e "strength ▕${m}🬋🬋🬋🬋🬋${z}"

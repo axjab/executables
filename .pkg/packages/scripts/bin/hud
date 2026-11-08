@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# Function to display health bars
+print_bar() {
+  local name=$1
+  local value=$2
+  local max=$3
+  local color_code=$4
+
+  # Calculate percentage and bar length
+  local percent=$((value * 100 / max))
+  local bar_length=$((percent / 2))  # Adjust the bar length (50 chars max)
+  local empty_length=$((50 - bar_length))
+
+  # Print the bar with color and status
+  printf "\e[${color_code}m%-${bar_length}s\e[0m%-${empty_length}s %d%%\n" $(seq -s' ' 0 $bar_length | tr -d '[:digit:]') "" $percent
+}
+
+# Default config file
+config_file="config.yaml"
+
+# Default values
+hunger_value=75
+hydration_value=50
+
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --hunger) hunger_value=$2; shift 2 ;;
+    --hydration) hydration_value=$2; shift 2 ;;
+    *) echo "Unknown argument: $1"; exit 1 ;;
+  esac
+done
+
+# Load the configuration file if available
+if [[ -f $config_file ]]; then
+  hunger_value=$(yq e '.bars[] | select(.name=="hunger") | .value' $config_file)
+  hydration_value=$(yq e '.bars[] | select(.name=="hydration") | .value' $config_file)
+fi
+
+# Define colors for the bars
+hunger_color_code=42  # Green
+hydration_color_code=44  # Blue
+
+# Print the bars
+print_bar "Hunger" $hunger_value 100 $hunger_color_code
+print_bar "Hydration" $hydration_value 100 $hydration_color_code
+
+# Real-time updates (optional)
+# Uncomment the following lines if you want to update the bars in real-time
+#
+# while true; do
+#   hunger_value=$(external_script --hunger)
+#   hydration_value=$(external_script --hydration)
+#   
+#   print_bar "Hunger" $hunger_value 100 $hunger_color_code
+#   print_bar "Hydration" $hydration_value 100 $hydration_color_code
+#
+#   sleep 1
+# done

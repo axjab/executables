@@ -1,0 +1,114 @@
+#!/bin/bash
+
+# Configuration Variables
+DT_DIR="${DT_DIR:-$HOME/.cache/deltat}"         # Default: ~/.cache/deltat
+DT_FORMAT_STORED="${DT_FORMAT_STORED:-%Y-%m-%dT%H:%M:%S}" # Default: ISO 8601 without timezone
+DT_FORMAT_DISPLAY="${DT_FORMAT_DISPLAY:-$DT_FORMAT_STORED}" # Default: Same as stored format
+DT_TIMESTAMP_FILE="$DT_DIR/timestamp"          # Timestamp storage file
+DT_HISTORY_FILE="$DT_DIR/history"              # History log file
+TZ="${TZ:-America/New_York}"  # Set timezone to Eastern Time
+
+# Function to initialize or validate the environment
+init_environment() {
+    # Ensure DT_DIR exists
+    [[ -d "$DT_DIR" ]] || mkdir -p "$DT_DIR"
+}
+
+# Function to check if a file contains a valid timestamp
+is_valid_timestamp() {
+    local ts="$1"
+    TZ='America/New_York' date -d "$ts" >/dev/null 2>&1
+}
+
+# Function to convert a timestamp to seconds since epoch
+timestamp_to_seconds() {
+    local ts="$1"
+    TZ='America/New_York' date -d "$ts" +%s 2>/dev/null
+}
+
+# Function to calculate and format the time difference
+time_difference() {
+    local last_time="$1"
+    local current_time="$2"
+    local diff=$((current_time - last_time))
+
+    # Calculate human-readable units
+    local seconds=$diff
+    local minutes=$((seconds / 60))
+    local hours=$((seconds / 3600))
+    local days=$((seconds / 86400))
+    local weeks=$((seconds / 604800))
+    local months=$((seconds / 2592000))
+    local years=$((seconds / 31536000))
+
+    if ((years > 0)); then
+        echo "$years year(s)"
+    elif ((months > 0)); then
+        echo "$months month(s)"
+    elif ((weeks > 0)); then
+        echo "$weeks week(s)"
+    elif ((days > 0)); then
+        echo "$days day(s)"
+    elif ((hours > 0)); then
+        echo "$hours hour(s)"
+    elif ((minutes > 0)); then
+        echo "$minutes minute(s)"
+    else
+        echo "$seconds second(s)"
+    fi
+}
+
+# Function to store the current timestamp
+store_timestamp() {
+    local ts_file="$1"
+    local current_time="$2"
+    TZ='America/New_York' date -d "@$current_time" +"$DT_FORMAT_STORED" > "$ts_file"
+}
+
+# Function to append a history entry
+append_history() {
+    local history_file="$1"
+    local current_time="$2"
+    local formatted_time
+    formatted_time=$(TZ='America/New_York' date -d "@$current_time" +"$DT_FORMAT_STORED")
+    echo "$formatted_time" >> "$history_file"
+}
+
+# Main Function
+main() {
+    init_environment
+
+    # Ensure timestamp file exists
+    local current_time
+    current_time=$(date +%s)
+
+    if [[ -f "$DT_TIMESTAMP_FILE" ]]; then
+        # Read and validate the last timestamp
+        local last_time_raw
+        last_time_raw=$(<"$DT_TIMESTAMP_FILE")
+        if is_valid_timestamp "$last_time_raw"; then
+            local last_time
+            last_time=$(timestamp_to_seconds "$last_time_raw")
+            local time_diff
+            time_diff=$(time_difference "$last_time" "$current_time")
+
+            # Display when the script was last invoked
+            local display_time
+            display_time=$(TZ='America/New_York' date -d "@$last_time" +"$DT_FORMAT_DISPLAY")
+            echo "This command was last invoked on $display_time ($time_diff ago)"
+        else
+            echo "Invalid timestamp in $DT_TIMESTAMP_FILE. Resetting."
+        fi
+    else
+        echo "This is the first invocation of this command."
+    fi
+
+    # Store the current timestamp
+    store_timestamp "$DT_TIMESTAMP_FILE" "$current_time"
+
+    # Append to history
+    append_history "$DT_HISTORY_FILE" "$current_time"
+}
+
+# Capture current time and invoke the main function
+main

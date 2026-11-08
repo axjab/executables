@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# init-disk-structure.sh
+# Initializes the canonical disk filesystem structure on a target mount point.
+# Usage: sudo ./init-disk-structure.sh /mnt/target
+
+set -euo pipefail
+
+TARGET="${1:-}"
+
+# --- validation ---
+if [[ -z "$TARGET" ]]; then
+    echo "error: no target mount point specified"
+    echo "usage: $0 /mnt/target"
+    exit 1
+fi
+
+if [[ ! -d "$TARGET" ]]; then
+    echo "error: target '$TARGET' does not exist or is not a directory"
+    exit 1
+fi
+
+if ! mountpoint -q "$TARGET"; then
+    echo "error: '$TARGET' is not a mount point — refusing to run"
+    exit 1
+fi
+
+echo "initializing disk structure at '$TARGET'..."
+
+# --- directories ---
+for dir in data logs meta ops; do
+    if [[ ! -d "$TARGET/$dir" ]]; then
+        mkdir "$TARGET/$dir"
+        echo "  created $dir/"
+    else
+        echo "  skipped $dir/ (already exists)"
+    fi
+done
+
+# --- RUN_OPERATIONS.sh ---
+if [[ ! -f "$TARGET/ops/RUN_OPERATIONS.sh" ]]; then
+    cat > "$TARGET/ops/RUN_OPERATIONS.sh" <<'EOF'
+#!/usr/bin/env bash
+# RUN_OPERATIONS.sh
+# Orchestrates all disk maintenance operations.
+# Invoked via ../runops symlink, typically by cron.
+
+set -euo pipefail
+
+DISK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LOGS="$DISK_ROOT/logs"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+LOGFILE="$LOGS/run_$TIMESTAMP.log"
+
+echo "[$TIMESTAMP] starting operations on $DISK_ROOT" | tee "$LOGFILE"
+
+# invoke individual op scripts here
+
+echo "[$(date +%Y%m%d_%H%M%S)] done" | tee -a "$LOGFILE"
+EOF
+    chmod +x "$TARGET/ops/RUN_OPERATIONS.sh"
+    echo "  created ops/RUN_OPERATIONS.sh"
+else
+    echo "  skipped ops/RUN_OPERATIONS.sh (already exists)"
+fi
+
+# --- runops symlink ---
+if [[ ! -L "$TARGET/runops" ]]; then
+    ln -s ops/RUN_OPERATIONS.sh "$TARGET/runops"
+    echo "  created runops -> ops/RUN_OPERATIONS.sh"
+else
+    echo "  skipped runops (already exists)"
+fi
+
+# --- ID ---
+if [[ ! -f "$TARGET/ID" ]]; then
+    DISK_DEVICE="$(findmnt -n -o SOURCE "$TARGET")"
+    DISK_UUID="$(blkid -s UUID -o value "$DISK_DEVICE" 2>/dev/null || echo "unknown")"
+    DISK_FSTYPE="$(findmnt -n -o FSTYPE "$TARGET")"
+    DISK_LABEL="$(blkid -s LABEL -o value "$DISK_DEVICE" 2>/dev/null || echo "unlabeled")"
+    cat > "$TARGET/ID" <<EOF
+DEVICE:   $DISK_DEVICE
+UUID:     $DISK_UUID
+LABEL:    $DISK_LABEL
+FSTYPE:   $DISK_FSTYPE
+MOUNTED:  $TARGET
+INIT:     $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+EOF
+    chmod 444 "$TARGET/ID"
+    echo "  created ID (read-only)"
+else
+    echo "  skipped ID (already exists)"
+fi
+
+echo ""
+echo "done. structure at '$TARGET':"
+tree -L 2 "$TARGET" 2>/dev/null || ls -la "$TARGET"

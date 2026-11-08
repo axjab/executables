@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+#
+# aic - a friendly wrapper around `aichat`.
+#
+# If you don't pass -m/--model or -r/--role, this script will pop up a
+# searchable list (using `gum filter`) so you can pick one instead of
+# having to remember model names or role names by hand.
+#
+# Usage: exactly like aichat, e.g.
+#   aic "what's the capital of France?"
+#   aic -m claude:claude-opus-4-20250514 "hello"
+
+ROLES_DIR="$HOME/.config/aichat/roles"
+
+# --- 1. Check which flags the user already gave us -----------------------
+
+model_given=false
+role_given=false
+
+for arg in "$@"; do
+    case "$arg" in
+        -m|--model|--model=*)
+            model_given=true
+            ;;
+        -r|--role|--role=*)
+            role_given=true
+            ;;
+    esac
+done
+
+# We'll collect any flags we need to add here
+extra_args=()
+
+# --- 2. Ask for a model if one wasn't given -------------------------------
+
+if [ "$model_given" = false ]; then
+    model=$(aichat --list-models | gum filter \
+        --header "Select a model" \
+        --placeholder "Type to search models...")
+
+    if [ -z "$model" ]; then
+        echo "No model selected, aborting." >&2
+        exit 1
+    fi
+
+    extra_args+=(-m "$model")
+fi
+
+# --- 3. Ask for a role if one wasn't given --------------------------------
+
+if [ "$role_given" = false ]; then
+
+    role_choice=$(
+        {
+            echo "(no role)"
+            echo "(create a new role)"
+            aichat --list-roles
+        } | gum filter \
+            --header "Select a role" \
+            --placeholder "Type to search roles..."
+    )
+
+    if [ "$role_choice" = "(create a new role)" ]; then
+        role_name=$(gum input --placeholder "Name for the new role")
+
+        if [ -n "$role_name" ]; then
+            mkdir -p "$ROLES_DIR"
+            gum write --placeholder "Write the role's system prompt here..." \
+                > "$ROLES_DIR/$role_name.md"
+            extra_args+=(-r "$role_name")
+        fi
+
+    elif [ -n "$role_choice" ] && [ "$role_choice" != "(no role)" ]; then
+        extra_args+=(-r "$role_choice")
+    fi
+    # if role_choice is empty or "(no role)", we just skip adding -r
+fi
+
+# --- 4. Run the real aichat command ---------------------------------------
+
+exec aichat "${extra_args[@]}" "$@"

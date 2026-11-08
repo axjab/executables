@@ -1,0 +1,13 @@
+#!/bin/bash
+
+echo -en "\nLocal:  "
+# get ip oneliner
+# ip route get 1.1.1.1 | awk -F"src " 'NR == 1{ split($2, a," ");print a[1]}'
+ip -o -f inet addr show | awk '/scope global/ {print $4}'
+
+echo -en "Router: 192.168.2.1\n"
+
+echo -n "Public:  "
+curl ipinfo.io/ip
+
+echo -e "\n"

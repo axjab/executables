@@ -1,0 +1,106 @@
+#!/bin/bash
+
+# TODO: IMPLEMENT CUSTOM EOF CHARACTER (ENTER instead of ^D)
+
+# Initialize an empty string to hold the input
+input=""
+quiet=false
+custom_prompt="Enter your text (press Ctrl+D to finish):\n"
+single_line=true  # Default behavior is to combine into a single line
+
+# Function to display the help message
+display_help() {
+    echo "Usage: $0 [OPTIONS]"
+    echo
+    echo "Description:"
+    echo "This script allows you to input multiple lines of text, which can be"
+    echo "either combined into a single line or preserved as separate lines."
+    echo "It's useful for gathering input where users may want to enter"
+    echo "paragraphs of text or multi-line data easily."
+    echo
+    echo "This program is BETTER than Readline for multiline input and BETTER than"
+    echo "'cat' or '</dev/stdin' because it allows arrow navigation for easier editing."
+    echo
+    echo "Use Cases:"
+    echo "  - Collecting user feedback in a chat application."
+    echo "  - Gathering multiline notes or comments."
+    echo "  - Inputting configuration settings with multiple parameters."
+    echo
+    echo "Options:"
+    echo "  -q, --quiet                     Suppress the prompt."
+    echo "  -p, --prompt 'Your custom prompt'   Set a custom prompt message."
+    echo "  -s, --single-line               Combine input into a single line (default)."
+    echo "  -m, --multi-line                Preserve newlines between inputs. Must quote variable."
+    echo "  -h, --help                      Display this help message."
+    echo
+    echo "IMPORTANT WARNING:"
+    echo "When using the output variable, make sure to use double-quotes:"
+    echo "  echo -e \"\$var\""
+    echo "because"
+    echo "  echo \$var"
+    echo "DOES NOT print newlines."
+}
+
+# Check for options
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+        -q|--quiet)
+            quiet=true
+            ;;
+        -p|--prompt)
+            shift  # Move to the next argument
+            custom_prompt="$1"
+            ;;
+        -e|--end-of-file)
+            shift
+            eof_character="$1"
+            ;;
+        -s|--single-line)
+            single_line=true
+            ;;
+        -m|--multi-line)
+            single_line=false
+            ;;
+        -h|--help)
+            display_help
+            exit 0
+            ;;
+        *)
+            echo "Usage: $0 [-q | --quiet] [-p 'Your custom prompt'] [-s | --single-line | -m | --multi-line] [-h | --help]" >&2
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+# Prompt the user (sent to stderr, unless quiet is enabled)
+if ! $quiet; then
+    echo -ne "$custom_prompt" >&2
+fi
+
+# Loop to read multiple lines of input with line editing enabled
+while true; do
+    # Prompt the user and allow line editing
+    if ! read -e line; then
+        # Exit the loop if Ctrl+D (EOF) is pressed
+        break
+    fi
+    
+    # Concatenate lines according to the specified mode
+    if $single_line; then
+        input+="$line "
+    else
+        input+="$line"$'\n'
+    fi
+done
+
+# Remove the trailing space/newline (optional)
+if $single_line; then
+    input="${input% }"  # Trim trailing space for single-line mode
+else
+    input="${input%$'\n'}"  # Trim trailing newline for multi-line mode
+fi
+
+# Display the final concatenated input
+# Output to stdout
+echo "$input"

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+
+exec code serve-web \
+--host 0.0.0.0 \
+--port 8000 \
+--without-connection-token \
+--disable-telemetry \
+--cli-data-dir /data/vscode/cli \
+--server-data-dir /data/vscode/server \
+--default-folder "$PWD" \
+"$@"
+
+# default port: 8000, hard-coded in Tailscale console

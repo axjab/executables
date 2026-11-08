@@ -1,0 +1,9 @@
+Package: scripts
+Version: 0.0.0
+Section: utils
+Priority: important
+Architecture: amd64
+Maintainer: axjab <axjab@github.com>
+Description: my shitty scripts
+Depends: jq
+Homepage: https://github.com/axjab/scripts

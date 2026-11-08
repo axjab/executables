@@ -1,0 +1,6 @@
+#!/bin/bash
+
+set -u
+
+cd "$DNS_CONTROL_DIR" || exit 1
+dnscontrol "$@"

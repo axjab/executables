@@ -1,0 +1,157 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+    cat <<EOF
+Usage: fswatch [OPTIONS] [COMMAND...]
+
+Options:
+  --watchfile PATH    Use PATH as the watchfile
+  -h, --help          Show this help message
+
+Watchfile resolution order:
+  1. --watchfile PATH
+  2. WATCHFILE environment variable
+  3. /etc/watchfile
+  4. ~/.config/watchfile
+  5. ~/watchfile
+  6. ./watchfile
+
+Watchfile lookup is case-insensitive.
+EOF
+}
+
+# Resolve a path with case-insensitive matching of each path component.
+resolve_watchfile() {
+    local path="$1"
+    local dir base entry
+
+    # Expand ~ if present.
+    if [[ "$path" == "~/"* ]]; then
+        path="$HOME/${path#~/}"
+    fi
+
+    # Absolute path.
+    if [[ "$path" == /* ]]; then
+        dir="/"
+        path="${path#/}"
+    else
+        dir="."
+    fi
+
+    # Walk each path component, matching directory entries case-insensitively.
+    IFS='/' read -ra components <<< "$path"
+
+    for component in "${components[@]}"; do
+        [[ -z "$component" ]] && continue
+
+        base="$dir"
+
+        entry=""
+        while IFS= read -r candidate; do
+            if [[ "${candidate,,}" == "${component,,}" ]]; then
+                entry="$candidate"
+                break
+            fi
+        done < <(find "$base" -mindepth 1 -maxdepth 1 -printf '%f\n')
+
+        [[ -n "$entry" ]] || return 1
+
+        if [[ "$dir" == "/" ]]; then
+            dir="/$entry"
+        else
+            dir="$dir/$entry"
+        fi
+    done
+
+    [[ -f "$dir" ]] || return 1
+
+    printf '%s\n' "$dir"
+}
+
+watchfile=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --watchfile)
+            [[ $# -ge 2 ]] || {
+                echo "fswatch: --watchfile requires a path" >&2
+                exit 2
+            }
+            watchfile="$2"
+            shift 2
+            ;;
+
+        --watchfile=*)
+            watchfile="${1#*=}"
+            shift
+            ;;
+
+        -h|--help)
+            usage
+            exit 0
+            ;;
+
+        --)
+            shift
+            break
+            ;;
+
+        *)
+            break
+            ;;
+    esac
+done
+
+# 1. --watchfile
+if [[ -n "$watchfile" ]]; then
+    watchfile="$(resolve_watchfile "$watchfile")" || {
+        echo "fswatch: watchfile not found: $watchfile" >&2
+        exit 1
+    }
+fi
+
+# 2. WATCHFILE environment variable
+if [[ -z "$watchfile" && -n "${WATCHFILE:-}" ]]; then
+    watchfile="$(resolve_watchfile "$WATCHFILE")" || {
+        echo "fswatch: watchfile not found: $WATCHFILE" >&2
+        exit 1
+    }
+fi
+
+# 3–6. Standard locations.
+if [[ -z "$watchfile" ]]; then
+    for candidate in \
+        "/etc/watchfile" \
+        "$HOME/.config/watchfile" \
+        "$HOME/watchfile" \
+        "./watchfile"
+    do
+        if resolved="$(resolve_watchfile "$candidate")"; then
+            watchfile="$resolved"
+            break
+        fi
+    done
+fi
+
+if [[ -z "$watchfile" ]]; then
+    echo "fswatch: no watchfile found" >&2
+    exit 1
+fi
+
+echo "fswatch: using watchfile: $watchfile" >&2
+
+set -x
+
+watchexec \
+    --watch-file "$watchfile" \
+    --ignore '*.tmp' \
+    --ignore '*.bck' \
+    --emit-events-to=json-stdio \
+    --postpone \
+    --debounce 1000ms \
+    --on-busy-update=queue \
+    --no-meta \
+    --shell=none \
+    "$@"

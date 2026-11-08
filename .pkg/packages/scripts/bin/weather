@@ -1,0 +1,51 @@
+#!/bin/bash
+
+weather() {
+  local location="${WEATHER_LOCATION:-}"
+  local format="3"
+  local lang="en"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        cat <<EOF
+usage: weather [options] [location]
+
+options:
+  -f, --full      full ASCII forecast
+  -w, --week      3-day week view
+  -j, --json      raw JSON output
+  -l, --lang      language code (default: en)
+  -h, --help      show this help text
+
+examples:
+  weather                   current conditions (uses \$WEATHER_LOCATION)
+  weather "Montreal"        override location on the fly
+  weather -f "Tokyo"        full forecast for any city
+  weather -l fr             French language output
+  weather -w -l de Berlin   3-day forecast for Berlin in German
+
+environment:
+  WEATHER_LOCATION          default location if none is provided
+EOF
+        return 0
+        ;;
+      -f|--full)   format=""           ;;
+      -w|--week)   format="?n"         ;;
+      -j|--json)   format="?format=j1" ;;
+      -l|--lang)   lang="$2"; shift    ;;
+      *)           location="$1"       ;;
+    esac
+    shift
+  done
+
+  local url="wttr.in/${location}"
+  [[ "$format" == "3"          ]] && url+="?format=3&lang=${lang}"
+  [[ "$format" == ""           ]] && url+="?lang=${lang}"
+  [[ "$format" == "?n"         ]] && url+="?n&lang=${lang}"
+  [[ "$format" == "?format=j1" ]] && url+="?format=j1"
+
+  curl -s "$url"
+}
+
+weather $@

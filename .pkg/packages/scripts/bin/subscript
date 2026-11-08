@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+input="$1"
+output=""
+
+while IFS= read -r -n1 char; do
+    case "$char" in
+        0) output+='₀' ;;
+        1) output+='₁' ;;
+        2) output+='₂' ;;
+        3) output+='₃' ;;
+        4) output+='₄' ;;
+        5) output+='₅' ;;
+        6) output+='₆' ;;
+        7) output+='₇' ;;
+        8) output+='₈' ;;
+        9) output+='₉' ;;
+        *) output+="$char" ;;
+    esac
+done <<< "$input"
+
+printf '%s' "$output"

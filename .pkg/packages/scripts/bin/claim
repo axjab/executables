@@ -1,0 +1,114 @@
+#!/bin/bash
+
+# claim — take ownership of files and directories
+# usage: claim [file|dir ...]
+#        claim (no args → interactive file picker)
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+CURRENT_USER=$(whoami)
+CURRENT_GROUP=$(id -gn)
+
+# ── helpers ─────────────────────────────────────────────────────────────────
+
+bail() {
+    gum style --foreground 1 "✗ $1"
+    exit 1
+}
+
+info() {
+    gum style --foreground 4 "→ $1"
+}
+
+success() {
+    gum style --foreground 2 "✓ $1"
+}
+
+warn() {
+    gum style --foreground 3 "⚠ $1"
+}
+
+# ── dependency check ─────────────────────────────────────────────────────────
+
+command -v gum &>/dev/null  || bail "gum is not installed. Install it first: https://github.com/charmbracelet/gum"
+command -v sudo &>/dev/null || bail "sudo is not available on this system."
+
+# ── no arguments → interactive file picker ───────────────────────────────────
+
+if [[ $# -eq 0 ]]; then
+    gum style --bold "No targets given — launching file picker"
+    TARGETS=$(gum file --all) || bail "No file selected."
+else
+    TARGETS=("$@")
+fi
+
+# ── confirm identity ─────────────────────────────────────────────────────────
+
+gum style \
+    --border normal --border-foreground 240 \
+    --padding "0 1" \
+    "Claiming as: $(gum style --bold "$CURRENT_USER:$CURRENT_GROUP")"
+
+# ── process each target ──────────────────────────────────────────────────────
+
+for TARGET in "${TARGETS[@]}"; do
+
+    # existence check
+    if [[ ! -e "$TARGET" ]]; then
+        warn "Skipping '$TARGET' — does not exist."
+        continue
+    fi
+
+    # resolve to absolute path for clarity
+    ABS=$(realpath "$TARGET")
+
+    # already owned — skip silently
+    OWNER=$(stat -c '%U' "$ABS")
+    if [[ "$OWNER" == "$CURRENT_USER" ]]; then
+        info "'$(basename "$ABS")' is already owned by you — skipping."
+        continue
+    fi
+
+    if [[ -d "$ABS" ]]; then
+
+        # directory → ask depth
+        gum style --bold "Directory: $ABS"
+        DEPTH=$(gum choose \
+            --header "How do you want to claim this directory?" \
+            "This directory only" \
+            "Recursively (all contents)" \
+            "Skip")
+
+        case "$DEPTH" in
+            "This directory only")
+                sudo chown -v "$CURRENT_USER:$CURRENT_GROUP" "$ABS" \
+                    && success "Claimed '$ABS'" \
+                    || bail "Failed to claim '$ABS' — do you have sudo rights?"
+                ;;
+            "Recursively (all contents)")
+                # extra confirmation before a recursive chown
+                gum confirm "Recursively chown everything inside '$ABS'?" \
+                    || { info "Skipped recursive claim."; continue; }
+
+                sudo chown -Rv "$CURRENT_USER:$CURRENT_GROUP" "$ABS" \
+                    && success "Recursively claimed '$ABS'" \
+                    || bail "Failed — do you have sudo rights?"
+                ;;
+            "Skip"|*)
+                info "Skipped '$ABS'."
+                ;;
+        esac
+
+    else
+
+        # plain file → straight claim with confirmation
+        gum confirm "Claim file '$ABS' as $(whoami)?" \
+            || { info "Skipped '$ABS'."; continue; }
+
+        sudo chown -v "$CURRENT_USER:$CURRENT_GROUP" "$ABS" \
+            && success "Claimed '$ABS'" \
+            || bail "Failed to claim '$ABS' — do you have sudo rights?"
+
+    fi
+
+done

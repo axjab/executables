@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SUBJECT="filesystem.changed"
+
+while IFS= read -r event; do
+    # Ignore empty input.
+    [[ -z "$event" ]] && continue
+
+    # Transform the Watchexec event into our application-level event.
+    #
+    # Dummy operations for now:
+    #   - extract the first changed path
+    #   - extract the filesystem event type
+    #   - derive its containing directory
+    #   - add host and timestamp
+    #   - retain the original Watchexec event for debugging
+    message=$(
+        jq \
+            --arg subject "$SUBJECT" \
+            --arg host "$(hostname)" \
+            --arg date "$(date --iso-8601=seconds)" \
+            '
+            {
+                subject: $subject,
+                host: $host,
+                date: $date,
+
+                path: (
+                    [.tags[] | select(.kind == "path") | .absolute]
+                    | first
+                ),
+
+                event: (
+                    [.tags[] | select(.kind == "fs") | .simple]
+                    | first
+                ),
+
+                directory: (
+                    [.tags[] | select(.kind == "path") | .absolute]
+                    | first
+                    | if . then sub("/[^/]*$"; "") else null end
+                ),
+    
+                # Dummy application-level transformation.
+                operation: "inspect",
+
+                # Keep the original event available while developing.
+                watchexec: .
+            }
+            ' <<< "$event"
+    )
+
+    printf '%s\n' "$message"
+
+    # Publish the transformed JSON to NATS.
+    nats pub "$SUBJECT" "$message"
+done

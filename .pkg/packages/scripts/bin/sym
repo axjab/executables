@@ -1,0 +1,113 @@
+#!/bin/bash
+
+# reverses the order of TARGET and LINK_NAME in command `ln`
+
+# TODO: add -sudo option
+
+declare -A option_descriptions=(
+    [" "]="What happens if no arg given?"
+    ["help"]="Display a help message"
+    ["debug"]="Opens this script with \$EDITOR"
+    ["<link> to <target>"]="main syntax"
+    ["*"]="Default function"
+)
+
+main() {
+    if [ $# -eq 0 ]; then show_usage; fi
+
+    case "$1" in
+            -h | h?lp  ) shift ; show_help ;;
+            -d | d*bug ) shift ; debug_this_script ;;
+            -from | from) shift ; default_fn "$@" ;;
+            *) default_fn "$@" ;;
+    esac
+
+    # Process should not reach this point, if it does, maybe forgot exit
+    echo -e "\e[31mERROR\e[0m" >&2
+    exit 1
+}
+
+# Now add functions here in alphabetical order **********************************************
+
+debug_this_script() {
+    micro $0
+    exit "$?"
+}
+
+default_fn() {
+    # Initialize variables
+    linkname=""
+    target=""
+    
+    # Check for missing arguments
+    if [[ $# -lt 2 ]]; then
+        err "Missing arguments"
+        exit 1
+    fi
+    
+    # Handle options
+    case "$1" in
+        to | -to)
+            err "Missing link name"
+            exit 1
+            ;;
+        *)
+            linkname="$1"
+            ;;
+    esac
+    
+    case "$2" in
+        to | -to | '-->')
+            if [[ -z "$3" ]]; then
+                err "Missing target for symlink"
+                exit 1
+            else
+                target="$3"
+            fi
+            ;;
+        *)
+            target="$2"
+            ;;
+    esac
+    
+    # Create the symlink and capture stderr
+    ln -siv "$target" "$linkname"
+    # exitstat="$?"
+    # 
+    # # Check exit status and log appropriately
+    # if [[ $exitstat -eq 0 ]]; then
+        # warn "Created symlink $linkname ---> $target"
+        # exit 0
+    # else
+        # err "ERROR: $stderr"
+        # exit $exitstat
+    # fi
+    exit "$?"
+}
+
+# Help function to display usage information and option descriptions
+show_help() {
+    # ANSI color codes for colors without using \e[33m and \e[31m
+    GREEN='\033[0;32m'
+    BLUE='\033[0;34m'
+    NC='\033[0m' # No Color
+
+    echo "Usage: $(basename "$0") [OPTIONS]"
+    echo "Options:"
+    for option in "${!option_descriptions[@]}"; do
+        printf "  ${GREEN}%-12s${NC} %s\n" "$option" "${option_descriptions[$option]}"
+    done
+    exit 0
+}
+
+show_usage() {
+	warn 'symlink <link> to <target>'
+	exit 1
+}
+
+# Messages
+warn(){ echo -e "\e[33m$@\e[0m"; }
+err() { echo -e "\e[31m$@\e[0m" 1>&2; }
+
+#warnings
+main "$@" #<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<

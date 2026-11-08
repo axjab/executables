@@ -1,0 +1,35 @@
+#!/bin/bash
+
+# td — taskdog wrapper
+# Default behaviour: launch tui
+# Usage: td [command] [args...]
+
+if [[ $# -eq 0 ]]; then
+  exec taskdog tui
+fi
+
+exec taskdog "$@"
+
+# axjab@xenon:~$ task add --help
+# Usage: taskdog add [OPTIONS] NAME
+
+#   Add a new task.
+
+# Options:
+#   -p, --priority INTEGER          Task priority (default: from config or 5,
+#                                   higher value = higher priority)
+#   -f, --fixed                     Mark task as fixed (won't be rescheduled by
+#                                   optimizer)
+#   -d, --depends-on INTEGER        Task IDs this task depends on (can be
+#                                   specified multiple times)
+#   -t, --tag TEXT                  Tags for categorization and filtering (can
+#                                   be specified multiple times)
+#   -D, --deadline [%Y-%m-%d %H:%M:%S]
+#                                   Task deadline (format: YYYY-MM-DD HH:MM:SS)
+#   -e, --estimate FLOAT            Estimated duration in hours (must be > 0)
+#   -s, --start [%Y-%m-%d %H:%M:%S]
+#                                   Planned start time (format: YYYY-MM-DD
+#                                   HH:MM:SS)
+#   -E, --end [%Y-%m-%d %H:%M:%S]   Planned end time (format: YYYY-MM-DD
+#                                   HH:MM:SS)
+#   -h, --help                      Show this message and exit.

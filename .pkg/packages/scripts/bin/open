@@ -1,0 +1,9 @@
+#!/bin/bash
+
+LOGFILE='/tmp/bin.open.log' # errors stored here
+DELAY=1.0                   # gives time for file to open to avoid collision
+
+for file in "$@"; do
+  xdg-open "$file" 2> "$LOGFILE" &
+  sleep $DELAY
+done

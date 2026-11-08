@@ -1,0 +1,36 @@
+#!/bin/bash
+
+EMOJI_DEFAULT="DEFAULT VALUE"
+
+# Array of emojis and symbols to test
+emojis=(
+    "😀" "😃" "😄" "😅" "😆" "😂" "🤣" "😊" "😇" "😍"
+    "😘" "😗" "😙" "😚" "😋" "😜" "😝" "😛" "😳" "😬"
+    "✔️" "✖️" "✅" "➡️" "⬅️" "⬆️" "⬇️" "🌈" "🌟" "✨"
+    "💖" "💙" "💚" "💛" "💜" "🖤" "🧡" "⭐" "💫" "⚡"
+)
+
+# Print header
+echo "Testing emojis and symbols in terminal:"
+echo "-----------------------------------------"
+
+# Loop through emojis and print in 3 columns
+for ((i=0; i<${#emojis[@]}; i++)); do
+    printf "%-4s" "${emojis[i]}"
+    # Print a newline after every third emoji
+    if (( (i + 1) % 3 == 0 )); then
+        echo
+    fi
+    sleep 0.01 # for dramatic effect
+done
+
+# Final newline for cleaner output
+echo
+echo "-----------------------------------------"
+
+#emoji=$([[ -n "$EMOJI" ]] && echo "$EMOJI" || echo "$EMOJI_DEFAULT")
+emoji=${EMOJI:-$EMOJI_DEFAULT}
+echo "EMOJI VALUE: $emoji"
+echo "EMAIL ACCESS TOKEN: $EMAIL_PASSWORD"
+echo "-----------------------------------------"
+echo "Testing complete!"

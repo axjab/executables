@@ -1,0 +1,1 @@
+rsync -avhP --exclude '.*' ./ .pkg/packages/scripts/bin/

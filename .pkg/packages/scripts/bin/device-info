@@ -1,0 +1,40 @@
+#!/bin/bash
+# Save as get_drive_info.sh
+
+DEVICE="/dev/sdd"  # Change to your device
+
+echo "=== Drive Information for $DEVICE ==="
+echo ""
+
+# 1. Basic block info
+echo "1. BLOCK DEVICE INFO:"
+sudo lsblk -o NAME,SIZE,FSTYPE,LABEL,MOUNTPOINT,UUID $DEVICE
+echo ""
+
+# 2. Filesystem details
+echo "2. FILESYSTEM DETAILS:"
+sudo blkid $DEVICE*
+echo ""
+
+# 3. SMART data (if available)
+echo "3. SMART STATUS:"
+if command -v smartctl &> /dev/null; then
+    sudo smartctl -i $DEVICE | head -20
+else
+    echo "smartctl not installed. Install with: sudo apt install smartmontools"
+fi
+echo ""
+
+# 4. Partition table
+echo "4. PARTITION TABLE:"
+sudo fdisk -l $DEVICE | head -20
+echo ""
+
+# 5. Model and serial
+echo "5. HARDWARE INFO:"
+sudo udevadm info --query=all --name=$DEVICE 2>/dev/null | grep -E "(MODEL|SERIAL|VENDOR|ID_MODEL)" | head -10
+echo ""
+
+# 6. Current usage
+echo "6. SPACE USAGE:"
+df -h $DEVICE* 2>/dev/null || echo "Not mounted"
