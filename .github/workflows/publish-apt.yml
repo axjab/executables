@@ -1,0 +1,106 @@
+name: Publish scripts to APT
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apt-scripts
+  queue: max
+
+jobs:
+  publish:
+    if: github.repository == 'axjab/scripts'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: apt-production
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Check out pkgcli
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: axjab/pkgcli
+          ref: c6ab84f67fb986d4db8542b6ae050f8134d88461
+          path: .pkgcli
+          persist-credentials: false
+
+      - name: Compile pkg
+        run: PKG_COMPILE_DIR="$RUNNER_TEMP" .pkgcli/do/compile
+
+      - name: Stage and build scripts
+        run: |
+          pkg="$RUNNER_TEMP/pkg"
+          staged_bin=.pkg/packages/scripts/bin
+          # The runner checkout is disposable. Rebuild its generated payload
+          # so renamed and deleted scripts cannot linger in the package.
+          rm -rf -- "$staged_bin"
+          mkdir -p -- "$staged_bin"
+
+          git ls-tree -z HEAD > "$RUNNER_TEMP/scripts-tree"
+          while IFS= read -r -d '' entry; do
+            mode=${entry%% *}
+            name=${entry#*$'\t'}
+            [[ $name != .* ]] || continue
+            case "$mode:$name" in
+              100755:*)
+                "$pkg" add executable "./$name" to scripts
+                ;;
+              120000:link|100644:open)
+                # Preserve these existing payload entries as-is.
+                cp -a -- "./$name" "$staged_bin/"
+                ;;
+            esac
+          done < "$RUNNER_TEMP/scripts-tree"
+
+          base_version=$("$pkg" get version from scripts)
+          version="${base_version}+git${GITHUB_RUN_NUMBER}"
+          "$pkg" set version "$version" in scripts
+          export SOURCE_DATE_EPOCH=0
+          archive=$("$pkg" build scripts)
+          [[ $(dpkg-deb --field "$archive" Version) == "$version" ]]
+          printf 'Built %s\n' "$archive"
+
+      - name: Publish the package
+        env:
+          APT_SSH_TARGET: ${{ vars.APT_SSH_TARGET }}
+          APT_SSH_PORT: ${{ vars.APT_SSH_PORT || '22' }}
+          APT_SSH_KNOWN_HOSTS: ${{ vars.APT_SSH_KNOWN_HOSTS }}
+          APT_SSH_PRIVATE_KEY: ${{ secrets.APT_SSH_PRIVATE_KEY }}
+        run: |
+          : "${APT_SSH_TARGET:?Set APT_SSH_TARGET to the publishing user@host}"
+          : "${APT_SSH_KNOWN_HOSTS:?Set APT_SSH_KNOWN_HOSTS to the verified SSH host key entry}"
+          : "${APT_SSH_PRIVATE_KEY:?Set the APT_SSH_PRIVATE_KEY secret}"
+          if [[ ! $APT_SSH_TARGET =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]*@[A-Za-z0-9][A-Za-z0-9.-]*$ ||
+                ! $APT_SSH_PORT =~ ^[1-9][0-9]{0,4}$ ]] || (( APT_SSH_PORT > 65535 )); then
+            printf 'Invalid APT SSH target or port\n' >&2
+            exit 1
+          fi
+
+          umask 077
+          ssh_dir=$(mktemp -d "$RUNNER_TEMP/apt-ssh.XXXXXXXX")
+          trap 'rm -rf -- "$ssh_dir"' EXIT
+          printf '%s\n' "$APT_SSH_PRIVATE_KEY" > "$ssh_dir/key"
+          unset APT_SSH_PRIVATE_KEY
+          printf '%s\n' "$APT_SSH_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          cat > "$ssh_dir/config" <<EOF
+          Host apt-ci
+            HostName ${APT_SSH_TARGET#*@}
+            User ${APT_SSH_TARGET%@*}
+            Port $APT_SSH_PORT
+            IdentityFile "$ssh_dir/key"
+            IdentitiesOnly yes
+            StrictHostKeyChecking yes
+            GlobalKnownHostsFile /dev/null
+            UserKnownHostsFile "$ssh_dir/known_hosts"
+          EOF
+
+          # pkg push uses ssh from PATH and sends the archive over stdin.
+          printf '#!/bin/bash\nexec /usr/bin/ssh -F "$APT_SSH_CONFIG" "$@"\n' > "$ssh_dir/ssh"
+          chmod 700 "$ssh_dir/ssh"
+          PATH="$ssh_dir:$PATH" APT_SSH_CONFIG="$ssh_dir/config" "$RUNNER_TEMP/pkg" push scripts to apt-ci
