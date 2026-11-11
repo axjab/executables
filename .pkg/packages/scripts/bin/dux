@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output_file=${DISPLAYFILE:-/home/i/etc/dux/dms/outputs.kdl}
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  dux help | -h
+  dux version | -v
+  dux {display|-d} [stat|reset]
+
+Display defaults to stat. Reset restores OUTPUT_FILE from HEAD.
+OUTPUT_FILE defaults to /home/i/etc/dux/dms/outputs.kdl.
+USAGE
+}
+
+action=
+case "${1:-}" in
+    help|-h)
+        if (( $# == 1 )); then
+            usage
+            exit 0
+        fi
+        ;;
+    version|-v)
+        if (( $# == 1 )); then
+            printf 'dux 0.1.0\n'
+            exit 0
+        fi
+        ;;
+    display|-d)
+        action=${2-stat}
+        if (( $# > 2 )) || [[ "$action" != stat && "$action" != reset ]]; then
+            usage >&2
+            exit 2
+        fi
+        ;;
+esac
+if [[ -z "$action" ]]; then
+    usage >&2
+    exit 2
+fi
+
+case "$output_file" in
+    */|.|..|*/.|*/..) printf 'Expected a file path: %s\n' "$output_file" >&2; exit 1 ;;
+esac
+if [[ -d "$output_file" && ! -L "$output_file" ]]; then
+    printf 'Expected a file path: %s\n' "$output_file" >&2
+    exit 1
+fi
+
+directory=$(dirname -- "$output_file")
+filename=${output_file##*/}
+# A staged deletion can also remove the file's parent directory.
+while [[ ! -d "$directory" ]]; do
+    filename="${directory##*/}/$filename"
+    directory=$(dirname -- "$directory")
+done
+git_cmd=(git --literal-pathspecs -C "$directory")
+
+case "$action" in
+    stat)
+        status=$("${git_cmd[@]}" status --short --no-renames --untracked-files=all --ignored=matching -- "$filename")
+        if [[ -n "$status" ]]; then
+            printf '%s\n' "$status"
+        elif "${git_cmd[@]}" ls-files --error-unmatch -- "$filename" >/dev/null 2>&1; then
+            printf 'Clean: %s\n' "$output_file"
+        else
+            printf 'No Git entry: %s\n' "$output_file"
+        fi
+        ;;
+    reset)
+        if [[ $("${git_cmd[@]}" cat-file -t "HEAD:./$filename" 2>/dev/null) != blob ]]; then
+            printf 'No file at this path in HEAD: %s\n' "$output_file" >&2
+            exit 1
+        fi
+        "${git_cmd[@]}" restore --source=HEAD --staged --worktree -- "$filename"
+        printf 'Restored from HEAD: %s\n' "$output_file"
+        ;;
+esac
