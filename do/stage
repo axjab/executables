@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# to run from root
+rsync -avhP ./bin/ ./.pkg/packages/scripts/bin/

@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+command -v uv >/dev/null 2>&1 || {
+    printf 'readme: uv is required\n' >&2
+    exit 127
+}
+command=(uv run --script "$ROOT/do/readme.py" "$@")
+if [[ -t 1 && -t 2 ]] && command -v gum >/dev/null 2>&1; then
+    exec gum spin --spinner dot --title "Building README…" --show-output -- "${command[@]}"
+fi
+printf 'Building README…\n' >&2
+exec "${command[@]}"
