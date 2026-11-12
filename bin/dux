@@ -65,9 +65,6 @@ profile_context() {
         error "active profile does not exist: $PROFILE_DIR/$ACTIVE_PROFILE"
         return 1
     }
-    # Git sees edits to outputs.kdl as edits to its symlink target.
-    GIT_PROFILE_DIR=$PROFILE_DIR
-    GIT_PROFILE_FILE=$ACTIVE_PROFILE
     output_dir=$(cd -- "$(dirname -- "$output_file")" && pwd -P)
     [[ "$PROFILE_DIR" == "$output_dir"/* ]] || {
         error "profile target must be inside the outputs directory: $PROFILE_DIR"
@@ -167,7 +164,7 @@ profile_toggle() {
 }
 
 profile_create() {
-    local name path temp_file changed=0 rc
+    local name path temp_file
     name=$1
     [[ "$name" == *.kdl ]] || name+='.kdl'
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
@@ -180,38 +177,9 @@ profile_create() {
         return 1
     }
 
-    # The active profile must be tracked before its Git diff can be used.
-    if ! git -C "$GIT_PROFILE_DIR" ls-files --error-unmatch -- "$GIT_PROFILE_FILE" >/dev/null 2>&1; then
-        error "active profile is not tracked by Git: $GIT_PROFILE_FILE"
-        return 1
-    fi
-
-    # Require staged or unstaged changes; don't create a duplicate by mistake.
-    if git -C "$GIT_PROFILE_DIR" diff --quiet -- "$GIT_PROFILE_FILE"; then
-        :
-    else
-        rc=$?
-        if (( rc != 1 )); then
-            error "could not inspect Git diff for $GIT_PROFILE_FILE"
-            return 1
-        fi
-        changed=1
-    fi
-    if git -C "$GIT_PROFILE_DIR" diff --cached --quiet -- "$GIT_PROFILE_FILE"; then
-        :
-    else
-        rc=$?
-        if (( rc != 1 )); then
-            error "could not inspect staged Git diff for $GIT_PROFILE_FILE"
-            return 1
-        fi
-        changed=1
-    fi
-    if (( changed == 0 )); then
-        error "no Git diff for $GIT_PROFILE_FILE; nothing to create"
-        return 1
-    fi
-
+    # Copy the active profile as it exists on disk, including any staged or
+    # unstaged edits. A clean profile can be cloned too, which is useful when
+    # the current layout simply does not match newly connected displays.
     temp_file=$(mktemp "$PROFILE_DIR/.dux-profile.XXXXXX")
     if [[ -f "$output_file" ]]; then
         if ! cp -- "$output_file" "$temp_file"; then
@@ -242,7 +210,7 @@ profile_menu() {
             "Show active profile" \
             "List profiles" \
             "Switch profile" \
-            "Create profile from current diff" \
+            "Clone active profile" \
             "Toggle read/write" \
             "Quit") || return 0
         case "$choice" in
@@ -252,7 +220,7 @@ profile_menu() {
                 name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum choose) || continue
                 profile_switch "$name"
                 ;;
-            'Create profile from current diff')
+            'Clone active profile')
                 name=$(gum input --placeholder 'Profile name (e.g. laptop)') || continue
                 [[ -n "$name" ]] || continue
                 profile_create "$name"
