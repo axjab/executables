@@ -10,7 +10,7 @@ Usage:
   dux help | -h
   dux version | -v
   dux                         Open the interactive menu
-  dux profile [list|stat|switch|create|edit]
+  dux profile [ls|stat|switch|new|edit|rm|mv]
   dux {display|-d} [stat|reset]
 
 Profile commands default to the interactive profile menu. Profiles are KDL
@@ -276,12 +276,12 @@ profile_menu() {
             "Quit") || return 0
         case "$choice" in
             'Show active profile') profile_stat ;;
-            'List profiles') profile_list ;;
+            'ls profiles') profile_list ;;
             'Switch profile')
                 name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
                 profile_switch "$name"
                 ;;
-            'Clone active profile')
+            'New profile')
                 name=$(gum_input --placeholder 'Profile name (e.g. laptop)') || continue
                 [[ -n "$name" ]] || continue
                 profile_create "$name"
@@ -384,7 +384,7 @@ main() {
             action=${1:-menu}
             case "$action" in
                 menu) (( $# == 0 )) || { usage >&2; return 2; }; profile_menu ;;
-                list) (( $# == 1 )) || { usage >&2; return 2; }; profile_list ;;
+                ls) (( $# == 1 )) || { usage >&2; return 2; }; profile_list ;;
                 stat|show|current) (( $# == 1 )) || { usage >&2; return 2; }; profile_stat ;;
                 switch)
                     shift
@@ -396,7 +396,7 @@ main() {
                     fi
                     profile_switch "$action"
                     ;;
-                create)
+                new)
                     shift
                     if (( $# == 0 )); then
                         require_command gum || return
