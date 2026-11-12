@@ -10,8 +10,8 @@ Usage:
   dux help | -h
   dux version | -v
   dux                         Open the interactive menu
-  dux profile [list|stat|switch|create|edit]
-  dux {display|-d} [stat|reset]
+  dux display [ls|stat|switch|new|edit|toggle|rm|mv]
+  dux disp | output     Short forms of display
 
 Profile commands default to the interactive profile menu. Profiles are KDL
 files in the directory containing DISPLAYFILE's symlink target (normally
@@ -92,7 +92,7 @@ profile_path() {
 profile_is_writable() {
     local mode
     mode=$(stat -c '%a' -- "$1") || return
-    (( (8#$mode & 0222) != 0 ))
+    (( (8#$mode & 0200) != 0 ))
 }
 
 gum_choose() {
@@ -103,6 +103,34 @@ gum_choose() {
 gum_input() {
     command gum input --prompt "Active profile: $ACTIVE_PROFILE > " \
         --prompt.foreground '#CBA6F7' "$@"
+}
+
+gum_confirm() {
+    command gum confirm --prompt.foreground '#CBA6F7' \
+        "Active profile: $ACTIVE_PROFILE — $1"
+}
+
+resolve_option() {
+    local input=$1 option
+    shift
+    local -a matches=()
+    for option in "$@"; do
+        if [[ "$option" == "$input" ]]; then
+            printf '%s\n' "$option"
+            return 0
+        fi
+        [[ "$option" == "$input"* ]] && matches+=("$option")
+    done
+    if (( ${#matches[@]} == 1 )); then
+        printf '%s\n' "${matches[0]}"
+        return 0
+    fi
+    if (( ${#matches[@]} > 1 )); then
+        error "ambiguous option '$input': ${matches[*]}"
+    else
+        error "unknown option: $input"
+    fi
+    return 2
 }
 
 profile_list() {
@@ -161,17 +189,29 @@ profile_switch() {
 }
 
 profile_toggle() {
-    local name path mode
-    name=${1:-$ACTIVE_PROFILE}
-    path=$(profile_path "$name") || return
+    local path mode
+    path=$(profile_path "$ACTIVE_PROFILE") || return
     if profile_is_writable "$path"; then
-        chmod a-w -- "$path"
+        chmod u-w -- "$path"
         mode='READ-ONLY '
     else
-        chmod u+rw,go-w -- "$path"
+        chmod u+w -- "$path"
         mode='READ/WRITE'
     fi
-    printf '%s: %s\n' "$name" "$mode"
+    printf '%s: %s\n' "$ACTIVE_PROFILE" "$mode"
+}
+
+
+profile_edit() {
+    local path editor
+    local -a editor_cmd=()
+    path=$(profile_path "$ACTIVE_PROFILE") || return
+    chmod u+rw -- "$path"
+    editor=${VISUAL:-${EDITOR:-vi}}
+    read -r -a editor_cmd <<< "$editor"
+    (( ${#editor_cmd[@]} > 0 )) || editor_cmd=(vi)
+    require_command "${editor_cmd[0]}" || return
+    "${editor_cmd[@]}" "$path"
 }
 
 profile_create() {
@@ -213,96 +253,98 @@ profile_create() {
     profile_switch "$name"
 }
 
+
+profile_remove() {
+    local name path
+    name=$1
+    path=$(profile_path "$name") || return
+    if [[ "$name" == "$ACTIVE_PROFILE" ]]; then
+        error "cannot remove the active profile; switch to another profile first"
+        return 1
+    fi
+    require_command gum || return
+    if ! gum_confirm "Remove profile '$name'?"; then
+        printf 'Not removed: %s\n' "$name"
+        return 0
+    fi
+    rm -- "$path"
+    printf 'Removed profile: %s\n' "$name"
+}
+
+profile_rename() {
+    local old_name new_name old_path new_path
+    old_name=$1
+    new_name=$2
+    [[ "$new_name" == *.kdl ]] || new_name+='.kdl'
+    [[ "$new_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
+        error "invalid profile name: $new_name"
+        return 2
+    }
+    old_path=$(profile_path "$old_name") || return
+    new_path="$PROFILE_DIR/$new_name"
+    [[ ! -e "$new_path" && ! -L "$new_path" ]] || {
+        error "profile already exists: $new_name"
+        return 1
+    }
+    mv -- "$old_path" "$new_path"
+    if [[ "$old_name" == "$ACTIVE_PROFILE" ]]; then
+        if ! profile_switch "$new_name"; then
+            mv -- "$new_path" "$old_path"
+            return 1
+        fi
+    fi
+    printf 'Renamed profile: %s -> %s\n' "$old_name" "$new_name"
+}
+
 profile_menu() {
-    local choice name
+    local choice name new_name
     require_command gum || return
     while true; do
         choice=$(gum_choose \
             "Show active profile" \
-            "List profiles" \
+            "ls profiles" \
             "Switch profile" \
-            "Clone active profile" \
-            "Toggle read/write" \
+            "New profile" \
+            "Toggle active profile read/write" \
+            "Edit active profile" \
+            "Remove profile" \
+            "Rename profile" \
             "Quit") || return 0
         case "$choice" in
             'Show active profile') profile_stat ;;
-            'List profiles') profile_list ;;
+            'ls profiles') profile_list ;;
             'Switch profile')
                 name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
                 profile_switch "$name"
                 ;;
-            'Clone active profile')
+            'New profile')
                 name=$(gum_input --placeholder 'Profile name (e.g. laptop)') || continue
                 [[ -n "$name" ]] || continue
                 profile_create "$name"
                 ;;
-            'Toggle read/write')
+            'Toggle active profile read/write')
+                profile_toggle || continue
+                ;;
+            'Edit active profile')
+                profile_edit || continue
+                ;;
+            'Remove profile')
                 name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
-                profile_toggle "$name"
+                profile_remove "$name" || continue
+                ;;
+            'Rename profile')
+                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
+                new_name=$(gum_input --placeholder "New name for $name") || continue
+                [[ -n "$new_name" ]] || continue
+                profile_rename "$name" "$new_name" || continue
                 ;;
             Quit) return 0 ;;
         esac
     done
 }
 
-display_command() {
-    local action directory filename status
-    action=${1:-stat}
-    (( $# <= 1 )) || { usage >&2; return 2; }
-    [[ "$action" == stat || "$action" == reset ]] || { usage >&2; return 2; }
-    validate_output_path
-    directory=$(dirname -- "$output_file")
-    filename=${output_file##*/}
-    while [[ ! -d "$directory" ]]; do
-        [[ "$directory" != / ]] || { error "no existing parent directory for $output_file"; return 1; }
-        filename="${directory##*/}/$filename"
-        directory=$(dirname -- "$directory")
-    done
-    local -a git_cmd=(git --literal-pathspecs -C "$directory")
-
-    case "$action" in
-        stat)
-            status=$("${git_cmd[@]}" status --short --no-renames --untracked-files=all --ignored=matching -- "$filename")
-            if [[ -n "$status" ]]; then
-                printf '%s\n' "$status"
-            elif "${git_cmd[@]}" ls-files --error-unmatch -- "$filename" >/dev/null 2>&1; then
-                printf 'Clean: %s\n' "$output_file"
-            else
-                printf 'No Git entry: %s\n' "$output_file"
-            fi
-            ;;
-        reset)
-            if [[ -L "$output_file" ]]; then
-                local target target_dir target_file
-                target=$(readlink -- "$output_file")
-                if [[ "$target" == /* ]]; then
-                    target_dir=$(dirname -- "$target")
-                    target_file=$(basename -- "$target")
-                else
-                    target_dir=$(dirname -- "$output_file")/$(dirname -- "$target")
-                    target_file=$(basename -- "$target")
-                fi
-                local -a target_git=(git --literal-pathspecs -C "$target_dir")
-                if [[ $("${target_git[@]}" cat-file -t "HEAD:./$target_file" 2>/dev/null) != blob ]]; then
-                    # New, uncommitted profiles have no HEAD version to restore.
-                    error "profile has no committed version in HEAD: $target"
-                    return 1
-                fi
-                "${target_git[@]}" restore --source=HEAD --staged --worktree -- "$target_file"
-            else
-                if [[ $("${git_cmd[@]}" cat-file -t "HEAD:./$filename" 2>/dev/null) != blob ]]; then
-                    error "no file at this path in HEAD: $output_file"
-                    return 1
-                fi
-                "${git_cmd[@]}" restore --source=HEAD --staged --worktree -- "$filename"
-            fi
-            printf 'Restored from HEAD: %s\n' "$output_file"
-            ;;
-    esac
-}
-
 main() {
-    local command action
+    local command action new_name
     command=${1:-}
     case "$command" in
         help|-h)
@@ -313,18 +355,15 @@ main() {
             (( $# == 1 )) || { usage >&2; return 2; }
             printf 'dux %s\n' "$VERSION"
             ;;
-        display|-d)
-            shift
-            display_command "$@"
-            ;;
-        profile|profiles)
+        display|disp|output|-d)
             shift
             validate_output_path
             profile_context
             action=${1:-menu}
+            action=$(resolve_option "$action" menu ls stat show current switch new edit toggle remove rm rename mv) || return
             case "$action" in
                 menu) (( $# == 0 )) || { usage >&2; return 2; }; profile_menu ;;
-                list) (( $# == 1 )) || { usage >&2; return 2; }; profile_list ;;
+                ls) (( $# == 1 )) || { usage >&2; return 2; }; profile_list ;;
                 stat|show|current) (( $# == 1 )) || { usage >&2; return 2; }; profile_stat ;;
                 switch)
                     shift
@@ -336,7 +375,7 @@ main() {
                     fi
                     profile_switch "$action"
                     ;;
-                create)
+                new)
                     shift
                     if (( $# == 0 )); then
                         require_command gum || return
@@ -347,11 +386,42 @@ main() {
                     [[ -n "$action" ]] || { error 'profile name is required'; return 2; }
                     profile_create "$action"
                     ;;
-                edit|toggle)
+                remove|rm)
                     shift
-                    action=${1:-$ACTIVE_PROFILE}
-                    (( $# <= 1 )) || { usage >&2; return 2; }
-                    profile_toggle "$action"
+                    if (( $# == 0 )); then
+                        require_command gum || return
+                        action=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || return 0
+                    else
+                        action=$1
+                        (( $# == 1 )) || { usage >&2; return 2; }
+                    fi
+                    profile_remove "$action"
+                    ;;
+                rename|mv)
+                    shift
+                    if (( $# == 0 )); then
+                        require_command gum || return
+                        action=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || return 0
+                        new_name=$(gum_input --placeholder "New name for $action") || return 0
+                        [[ -n "$new_name" ]] || { error 'new profile name is required'; return 2; }
+                    elif (( $# == 2 )); then
+                        action=$1
+                        new_name=$2
+                    else
+                        usage >&2
+                        return 2
+                    fi
+                    profile_rename "$action" "$new_name"
+                    ;;
+                toggle)
+                    shift
+                    (( $# == 0 )) || { usage >&2; return 2; }
+                    profile_toggle
+                    ;;
+                edit)
+                    shift
+                    (( $# == 0 )) || { usage >&2; return 2; }
+                    profile_edit
                     ;;
                 *) usage >&2; return 2 ;;
             esac
