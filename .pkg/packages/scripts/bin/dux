@@ -267,9 +267,9 @@ profile_menu() {
     while true; do
         choice=$(gum_choose \
             "Show active profile" \
-            "List profiles" \
+            "ls profiles" \
             "Switch profile" \
-            "Clone active profile" \
+            "New profile" \
             "Toggle read/write" \
             "Remove profile" \
             "Rename profile" \
