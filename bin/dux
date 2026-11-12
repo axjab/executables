@@ -72,8 +72,19 @@ profile_context() {
     }
 }
 
-profile_path() {
+normalize_profile_name() {
     local name=$1
+    [[ "$name" == *.kdl ]] || name+='.kdl'
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
+        error "invalid profile name: $1 (use letters, numbers, dots, underscores or hyphens)"
+        return 1
+    }
+    printf '%s\n' "$name"
+}
+
+profile_path() {
+    local name
+    name=$(normalize_profile_name "$1") || return
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
         error "invalid profile name: $name (use letters, numbers, dots, underscores or hyphens)"
         return 1
@@ -170,7 +181,7 @@ profile_stat() {
 
 profile_switch() {
     local name path link_target temp_link parent
-    name=$1
+    name=$(normalize_profile_name "$1") || return
     path=$(profile_path "$name") || return
     parent=$(cd -- "$(dirname -- "$output_file")" && pwd -P)
     link_target="$PROFILE_DIR/$name"
@@ -256,7 +267,7 @@ profile_create() {
 
 profile_remove() {
     local name path
-    name=$1
+    name=$(normalize_profile_name "$1") || return
     path=$(profile_path "$name") || return
     if [[ "$name" == "$ACTIVE_PROFILE" ]]; then
         error "cannot remove the active profile; switch to another profile first"
@@ -273,13 +284,8 @@ profile_remove() {
 
 profile_rename() {
     local old_name new_name old_path new_path
-    old_name=$1
-    new_name=$2
-    [[ "$new_name" == *.kdl ]] || new_name+='.kdl'
-    [[ "$new_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
-        error "invalid profile name: $new_name"
-        return 2
-    }
+    old_name=$(normalize_profile_name "$1") || return
+    new_name=$(normalize_profile_name "$2") || return
     old_path=$(profile_path "$old_name") || return
     new_path="$PROFILE_DIR/$new_name"
     [[ ! -e "$new_path" && ! -L "$new_path" ]] || {
