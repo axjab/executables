@@ -105,6 +105,11 @@ gum_input() {
         --prompt.foreground '#CBA6F7' "$@"
 }
 
+gum_confirm() {
+    command gum confirm --prompt.foreground '#CBA6F7' \
+        "Active profile: $ACTIVE_PROFILE — $1"
+}
+
 profile_list() {
     local file name marker active
     active=$(basename -- "$(readlink -- "$output_file")")
@@ -213,8 +218,51 @@ profile_create() {
     profile_switch "$name"
 }
 
+
+profile_remove() {
+    local name path
+    name=$1
+    path=$(profile_path "$name") || return
+    if [[ "$name" == "$ACTIVE_PROFILE" ]]; then
+        error "cannot remove the active profile; switch to another profile first"
+        return 1
+    fi
+    require_command gum || return
+    if ! gum_confirm "Remove profile '$name'?"; then
+        printf 'Not removed: %s\n' "$name"
+        return 0
+    fi
+    rm -- "$path"
+    printf 'Removed profile: %s\n' "$name"
+}
+
+profile_rename() {
+    local old_name new_name old_path new_path
+    old_name=$1
+    new_name=$2
+    [[ "$new_name" == *.kdl ]] || new_name+='.kdl'
+    [[ "$new_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
+        error "invalid profile name: $new_name"
+        return 2
+    }
+    old_path=$(profile_path "$old_name") || return
+    new_path="$PROFILE_DIR/$new_name"
+    [[ ! -e "$new_path" && ! -L "$new_path" ]] || {
+        error "profile already exists: $new_name"
+        return 1
+    }
+    mv -- "$old_path" "$new_path"
+    if [[ "$old_name" == "$ACTIVE_PROFILE" ]]; then
+        if ! profile_switch "$new_name"; then
+            mv -- "$new_path" "$old_path"
+            return 1
+        fi
+    fi
+    printf 'Renamed profile: %s -> %s\n' "$old_name" "$new_name"
+}
+
 profile_menu() {
-    local choice name
+    local choice name new_name
     require_command gum || return
     while true; do
         choice=$(gum_choose \
@@ -223,6 +271,8 @@ profile_menu() {
             "Switch profile" \
             "Clone active profile" \
             "Toggle read/write" \
+            "Remove profile" \
+            "Rename profile" \
             "Quit") || return 0
         case "$choice" in
             'Show active profile') profile_stat ;;
@@ -239,6 +289,16 @@ profile_menu() {
             'Toggle read/write')
                 name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
                 profile_toggle "$name"
+                ;;
+            'Remove profile')
+                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
+                profile_remove "$name"
+                ;;
+            'Rename profile')
+                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
+                new_name=$(gum_input --placeholder "New name for $name") || continue
+                [[ -n "$new_name" ]] || continue
+                profile_rename "$name" "$new_name"
                 ;;
             Quit) return 0 ;;
         esac
@@ -346,6 +406,33 @@ main() {
                     fi
                     [[ -n "$action" ]] || { error 'profile name is required'; return 2; }
                     profile_create "$action"
+                    ;;
+                remove|rm)
+                    shift
+                    if (( $# == 0 )); then
+                        require_command gum || return
+                        action=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || return 0
+                    else
+                        action=$1
+                        (( $# == 1 )) || { usage >&2; return 2; }
+                    fi
+                    profile_remove "$action"
+                    ;;
+                rename|mv)
+                    shift
+                    if (( $# == 0 )); then
+                        require_command gum || return
+                        action=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || return 0
+                        new_name=$(gum_input --placeholder "New name for $action") || return 0
+                        [[ -n "$new_name" ]] || { error 'new profile name is required'; return 2; }
+                    elif (( $# == 2 )); then
+                        action=$1
+                        new_name=$2
+                    else
+                        usage >&2
+                        return 2
+                    fi
+                    profile_rename "$action" "$new_name"
                     ;;
                 edit|toggle)
                     shift
