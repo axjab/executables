@@ -206,7 +206,7 @@ profile_edit() {
     local path editor
     local -a editor_cmd=()
     path=$(profile_path "$ACTIVE_PROFILE") || return
-    chmod u+w -- "$path"
+    chmod u+rw -- "$path"
     editor=${VISUAL:-${EDITOR:-vi}}
     read -r -a editor_cmd <<< "$editor"
     (( ${#editor_cmd[@]} > 0 )) || editor_cmd=(vi)
