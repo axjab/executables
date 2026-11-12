@@ -5,5 +5,5 @@ Priority: important
 Architecture: amd64
 Maintainer: axjab <axjab@github.com>
 Description: my shitty scripts
-Depends: jq
+Depends: jq, gum
 Homepage: https://github.com/axjab/scripts
