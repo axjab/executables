@@ -10,8 +10,8 @@ Usage:
   dux help | -h
   dux version | -v
   dux                         Open the interactive menu
-  dux profile [ls|stat|switch|new|edit|rm|mv]
-  dux {display|-d} [stat|reset]
+  dux display [ls|stat|switch|new|edit|toggle|rm|mv]
+  dux disp | output     Short forms of display
 
 Profile commands default to the interactive profile menu. Profiles are KDL
 files in the directory containing DISPLAYFILE's symlink target (normally
@@ -328,62 +328,6 @@ profile_menu() {
     done
 }
 
-display_command() {
-    local action directory filename status
-    action=${1:-stat}
-    (( $# <= 1 )) || { usage >&2; return 2; }
-    [[ "$action" == stat || "$action" == reset ]] || { usage >&2; return 2; }
-    validate_output_path
-    directory=$(dirname -- "$output_file")
-    filename=${output_file##*/}
-    while [[ ! -d "$directory" ]]; do
-        [[ "$directory" != / ]] || { error "no existing parent directory for $output_file"; return 1; }
-        filename="${directory##*/}/$filename"
-        directory=$(dirname -- "$directory")
-    done
-    local -a git_cmd=(git --literal-pathspecs -C "$directory")
-
-    case "$action" in
-        stat)
-            status=$("${git_cmd[@]}" status --short --no-renames --untracked-files=all --ignored=matching -- "$filename")
-            if [[ -n "$status" ]]; then
-                printf '%s\n' "$status"
-            elif "${git_cmd[@]}" ls-files --error-unmatch -- "$filename" >/dev/null 2>&1; then
-                printf 'Clean: %s\n' "$output_file"
-            else
-                printf 'No Git entry: %s\n' "$output_file"
-            fi
-            ;;
-        reset)
-            if [[ -L "$output_file" ]]; then
-                local target target_dir target_file
-                target=$(readlink -- "$output_file")
-                if [[ "$target" == /* ]]; then
-                    target_dir=$(dirname -- "$target")
-                    target_file=$(basename -- "$target")
-                else
-                    target_dir=$(dirname -- "$output_file")/$(dirname -- "$target")
-                    target_file=$(basename -- "$target")
-                fi
-                local -a target_git=(git --literal-pathspecs -C "$target_dir")
-                if [[ $("${target_git[@]}" cat-file -t "HEAD:./$target_file" 2>/dev/null) != blob ]]; then
-                    # New, uncommitted profiles have no HEAD version to restore.
-                    error "profile has no committed version in HEAD: $target"
-                    return 1
-                fi
-                "${target_git[@]}" restore --source=HEAD --staged --worktree -- "$target_file"
-            else
-                if [[ $("${git_cmd[@]}" cat-file -t "HEAD:./$filename" 2>/dev/null) != blob ]]; then
-                    error "no file at this path in HEAD: $output_file"
-                    return 1
-                fi
-                "${git_cmd[@]}" restore --source=HEAD --staged --worktree -- "$filename"
-            fi
-            printf 'Restored from HEAD: %s\n' "$output_file"
-            ;;
-    esac
-}
-
 main() {
     local command action new_name
     command=${1:-}
@@ -396,11 +340,7 @@ main() {
             (( $# == 1 )) || { usage >&2; return 2; }
             printf 'dux %s\n' "$VERSION"
             ;;
-        display|-d)
-            shift
-            display_command "$@"
-            ;;
-        profile|profiles)
+        display|disp|output|-d)
             shift
             validate_output_path
             profile_context
