@@ -14,8 +14,8 @@ Usage:
   dux {display|-d} [stat|reset]
 
 Profile commands default to the interactive profile menu. Profiles are KDL
-files in the directory containing OUTPUTFILE's symlink target (normally
-profiles/). The active profile is selected by the OUTPUTFILE symlink.
+files in the directory containing DISPLAYFILE's symlink target (normally
+profiles/). The active profile is selected by the DISPLAYFILE symlink.
 
 Environment:
   DISPLAYFILE   Path to the outputs.kdl symlink
@@ -104,7 +104,7 @@ profile_list() {
     printf 'Profiles (%s active)\n\n' "$active"
     shopt -s nullglob
     for file in "$PROFILE_DIR"/*.kdl; do
-        [[ -f "$file" ]] || continue
+        [[ -f "$file" && ! -L "$file" ]] || continue
         name=${file##*/}
         marker=''
         if ! profile_is_writable "$file"; then
@@ -167,7 +167,7 @@ profile_toggle() {
 }
 
 profile_create() {
-    local name path temp_file
+    local name path temp_file changed=0 rc
     name=$1
     [[ "$name" == *.kdl ]] || name+='.kdl'
     [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
@@ -180,9 +180,34 @@ profile_create() {
         return 1
     }
 
+    # The active profile must be tracked before its Git diff can be used.
+    if ! git -C "$GIT_PROFILE_DIR" ls-files --error-unmatch -- "$GIT_PROFILE_FILE" >/dev/null 2>&1; then
+        error "active profile is not tracked by Git: $GIT_PROFILE_FILE"
+        return 1
+    fi
+
     # Require staged or unstaged changes; don't create a duplicate by mistake.
-    if git -C "$GIT_PROFILE_DIR" diff --quiet -- "$GIT_PROFILE_FILE" \
-        && git -C "$GIT_PROFILE_DIR" diff --cached --quiet -- "$GIT_PROFILE_FILE"; then
+    if git -C "$GIT_PROFILE_DIR" diff --quiet -- "$GIT_PROFILE_FILE"; then
+        :
+    else
+        rc=$?
+        if (( rc != 1 )); then
+            error "could not inspect Git diff for $GIT_PROFILE_FILE"
+            return 1
+        fi
+        changed=1
+    fi
+    if git -C "$GIT_PROFILE_DIR" diff --cached --quiet -- "$GIT_PROFILE_FILE"; then
+        :
+    else
+        rc=$?
+        if (( rc != 1 )); then
+            error "could not inspect staged Git diff for $GIT_PROFILE_FILE"
+            return 1
+        fi
+        changed=1
+    fi
+    if (( changed == 0 )); then
         error "no Git diff for $GIT_PROFILE_FILE; nothing to create"
         return 1
     fi
