@@ -95,6 +95,16 @@ profile_is_writable() {
     (( (8#$mode & 0222) != 0 ))
 }
 
+gum_choose() {
+    command gum choose --header "Active profile: $ACTIVE_PROFILE" \
+        --header.foreground '#CBA6F7' "$@"
+}
+
+gum_input() {
+    command gum input --prompt "Active profile: $ACTIVE_PROFILE > " \
+        --prompt.foreground '#CBA6F7' "$@"
+}
+
 profile_list() {
     local file name marker active
     active=$(basename -- "$(readlink -- "$output_file")")
@@ -146,6 +156,7 @@ profile_switch() {
         error "could not update $output_file"
         return 1
     fi
+    ACTIVE_PROFILE=$name
     printf 'Active profile: %s\n' "$name"
 }
 
@@ -206,7 +217,7 @@ profile_menu() {
     local choice name
     require_command gum || return
     while true; do
-        choice=$(gum choose \
+        choice=$(gum_choose \
             "Show active profile" \
             "List profiles" \
             "Switch profile" \
@@ -217,16 +228,16 @@ profile_menu() {
             'Show active profile') profile_stat ;;
             'List profiles') profile_list ;;
             'Switch profile')
-                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum choose) || continue
+                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
                 profile_switch "$name"
                 ;;
             'Clone active profile')
-                name=$(gum input --placeholder 'Profile name (e.g. laptop)') || continue
+                name=$(gum_input --placeholder 'Profile name (e.g. laptop)') || continue
                 [[ -n "$name" ]] || continue
                 profile_create "$name"
                 ;;
             'Toggle read/write')
-                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum choose) || continue
+                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
                 profile_toggle "$name"
                 ;;
             Quit) return 0 ;;
@@ -319,7 +330,7 @@ main() {
                     shift
                     if (( $# == 0 )); then
                         require_command gum || return
-                        action=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum choose) || return 0
+                        action=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || return 0
                     else
                         action=$1
                     fi
@@ -329,7 +340,7 @@ main() {
                     shift
                     if (( $# == 0 )); then
                         require_command gum || return
-                        action=$(gum input --placeholder 'Profile name (e.g. laptop)') || return 0
+                        action=$(gum_input --placeholder 'Profile name (e.g. laptop)') || return 0
                     else
                         action=$1
                     fi
