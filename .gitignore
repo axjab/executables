@@ -1,3 +1,4 @@
 # Large (>100MB) executables
 pkg/
+dist/
 qb
