@@ -1,81 +1,367 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-output_file=${DISPLAYFILE:-/home/i/etc/dux/dms/outputs.kdl}
+readonly VERSION='0.2.0'
+output_file=${DISPLAYFILE:-${HOME:-/home/i}/etc/niri/outputs.kdl}
 
 usage() {
     cat <<'USAGE'
 Usage:
   dux help | -h
   dux version | -v
+  dux                         Open the interactive menu
+  dux profile [list|stat|switch|create|edit]
   dux {display|-d} [stat|reset]
 
-Display defaults to stat. Reset restores OUTPUT_FILE from HEAD.
-OUTPUT_FILE defaults to /home/i/etc/dux/dms/outputs.kdl.
+Profile commands default to the interactive profile menu. Profiles are KDL
+files in the directory containing OUTPUTFILE's symlink target (normally
+profiles/). The active profile is selected by the OUTPUTFILE symlink.
+
+Environment:
+  DISPLAYFILE   Path to the outputs.kdl symlink
+                (default: ~/etc/niri/outputs.kdl)
 USAGE
 }
 
-action=
-case "${1:-}" in
-    help|-h)
-        if (( $# == 1 )); then
-            usage
-            exit 0
-        fi
-        ;;
-    version|-v)
-        if (( $# == 1 )); then
-            printf 'dux 0.1.0\n'
-            exit 0
-        fi
-        ;;
-    display|-d)
-        action=${2-stat}
-        if (( $# > 2 )) || [[ "$action" != stat && "$action" != reset ]]; then
-            usage >&2
-            exit 2
-        fi
-        ;;
-esac
-if [[ -z "$action" ]]; then
-    usage >&2
-    exit 2
-fi
+error() {
+    printf 'dux: %s\n' "$*" >&2
+}
 
-case "$output_file" in
-    */|.|..|*/.|*/..) printf 'Expected a file path: %s\n' "$output_file" >&2; exit 1 ;;
-esac
-if [[ -d "$output_file" && ! -L "$output_file" ]]; then
-    printf 'Expected a file path: %s\n' "$output_file" >&2
-    exit 1
-fi
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || {
+        error "required command not found: $1"
+        return 1
+    }
+}
 
-directory=$(dirname -- "$output_file")
-filename=${output_file##*/}
-# A staged deletion can also remove the file's parent directory.
-while [[ ! -d "$directory" ]]; do
-    filename="${directory##*/}/$filename"
-    directory=$(dirname -- "$directory")
-done
-git_cmd=(git --literal-pathspecs -C "$directory")
+validate_output_path() {
+    case "$output_file" in
+        ''|*/|.|..|*/.|*/..) error "expected a file path: $output_file"; return 1 ;;
+    esac
+    if [[ -d "$output_file" && ! -L "$output_file" ]]; then
+        error "expected a file path: $output_file"
+        return 1
+    fi
+}
 
-case "$action" in
-    stat)
-        status=$("${git_cmd[@]}" status --short --no-renames --untracked-files=all --ignored=matching -- "$filename")
-        if [[ -n "$status" ]]; then
-            printf '%s\n' "$status"
-        elif "${git_cmd[@]}" ls-files --error-unmatch -- "$filename" >/dev/null 2>&1; then
-            printf 'Clean: %s\n' "$output_file"
+profile_context() {
+    local target output_dir
+    [[ -L "$output_file" ]] || {
+        error "not a symlink: $output_file"
+        return 1
+    }
+    target=$(readlink -- "$output_file")
+    if [[ "$target" == /* ]]; then
+        PROFILE_DIR=$(dirname -- "$target")
+    else
+        PROFILE_DIR=$(dirname -- "$output_file")/$(dirname -- "$target")
+    fi
+    PROFILE_DIR=$(cd -- "$PROFILE_DIR" 2>/dev/null && pwd -P) || {
+        error "profile directory does not exist: $PROFILE_DIR"
+        return 1
+    }
+    ACTIVE_PROFILE=$(basename -- "$target")
+    [[ -f "$PROFILE_DIR/$ACTIVE_PROFILE" ]] || {
+        error "active profile does not exist: $PROFILE_DIR/$ACTIVE_PROFILE"
+        return 1
+    }
+    # Git sees edits to outputs.kdl as edits to its symlink target.
+    GIT_PROFILE_DIR=$PROFILE_DIR
+    GIT_PROFILE_FILE=$ACTIVE_PROFILE
+    output_dir=$(cd -- "$(dirname -- "$output_file")" && pwd -P)
+    [[ "$PROFILE_DIR" == "$output_dir"/* ]] || {
+        error "profile target must be inside the outputs directory: $PROFILE_DIR"
+        return 1
+    }
+}
+
+profile_path() {
+    local name=$1
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
+        error "invalid profile name: $name (use letters, numbers, dots, underscores or hyphens)"
+        return 1
+    }
+    [[ -f "$PROFILE_DIR/$name" ]] || {
+        error "profile not found: $name"
+        return 1
+    }
+    [[ ! -L "$PROFILE_DIR/$name" ]] || {
+        error "profile must be a regular file, not a symlink: $name"
+        return 1
+    }
+    printf '%s\n' "$PROFILE_DIR/$name"
+}
+
+profile_is_writable() {
+    local mode
+    mode=$(stat -c '%a' -- "$1") || return
+    (( (8#$mode & 0222) != 0 ))
+}
+
+profile_list() {
+    local file name marker active
+    active=$(basename -- "$(readlink -- "$output_file")")
+    printf 'Profiles (%s active)\n\n' "$active"
+    shopt -s nullglob
+    for file in "$PROFILE_DIR"/*.kdl; do
+        [[ -f "$file" ]] || continue
+        name=${file##*/}
+        marker=''
+        if ! profile_is_writable "$file"; then
+            marker=' '
+        fi
+        if [[ "$name" == "$active" ]]; then
+            printf '  ● %s%s\n' "$name" "$marker"
         else
-            printf 'No Git entry: %s\n' "$output_file"
+            printf '  ○ %s%s\n' "$name" "$marker"
         fi
-        ;;
-    reset)
-        if [[ $("${git_cmd[@]}" cat-file -t "HEAD:./$filename" 2>/dev/null) != blob ]]; then
-            printf 'No file at this path in HEAD: %s\n' "$output_file" >&2
-            exit 1
+    done
+    shopt -u nullglob
+}
+
+profile_stat() {
+    local path mode state target
+    target=$(readlink -- "$output_file")
+    path="$PROFILE_DIR/$ACTIVE_PROFILE"
+    if profile_is_writable "$path"; then
+        state='READ/WRITE'
+    else
+        state='READ-ONLY '
+    fi
+    mode=$(stat -c '%A (%a)' -- "$path")
+    printf 'Active:   %s\nTarget:   %s\nAccess:   %s\nMode:     %s\n' \
+        "$ACTIVE_PROFILE" "$target" "$state" "$mode"
+}
+
+profile_switch() {
+    local name path link_target temp_link parent
+    name=$1
+    path=$(profile_path "$name") || return
+    parent=$(cd -- "$(dirname -- "$output_file")" && pwd -P)
+    link_target="$PROFILE_DIR/$name"
+    if [[ "$PROFILE_DIR" == "$parent"/* ]]; then
+        link_target=${link_target#"$parent"/}
+    fi
+    temp_link="$parent/.${output_file##*/}.dux.$$"
+    ln -s -- "$link_target" "$temp_link"
+    if ! mv -Tf -- "$temp_link" "$output_file"; then
+        rm -f -- "$temp_link"
+        error "could not update $output_file"
+        return 1
+    fi
+    printf 'Active profile: %s\n' "$name"
+}
+
+profile_toggle() {
+    local name path mode
+    name=${1:-$ACTIVE_PROFILE}
+    path=$(profile_path "$name") || return
+    if profile_is_writable "$path"; then
+        chmod a-w -- "$path"
+        mode='READ-ONLY '
+    else
+        chmod u+rw,go-w -- "$path"
+        mode='READ/WRITE'
+    fi
+    printf '%s: %s\n' "$name" "$mode"
+}
+
+profile_create() {
+    local name path temp_file
+    name=$1
+    [[ "$name" == *.kdl ]] || name+='.kdl'
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
+        error "invalid profile name: $name"
+        return 2
+    }
+    path="$PROFILE_DIR/$name"
+    [[ ! -e "$path" && ! -L "$path" ]] || {
+        error "profile already exists: $name"
+        return 1
+    }
+
+    # Require staged or unstaged changes; don't create a duplicate by mistake.
+    if git -C "$GIT_PROFILE_DIR" diff --quiet -- "$GIT_PROFILE_FILE" \
+        && git -C "$GIT_PROFILE_DIR" diff --cached --quiet -- "$GIT_PROFILE_FILE"; then
+        error "no Git diff for $GIT_PROFILE_FILE; nothing to create"
+        return 1
+    fi
+
+    temp_file=$(mktemp "$PROFILE_DIR/.dux-profile.XXXXXX")
+    if [[ -f "$output_file" ]]; then
+        if ! cp -- "$output_file" "$temp_file"; then
+            rm -f -- "$temp_file"
+            error "could not copy active profile: $ACTIVE_PROFILE"
+            return 1
         fi
-        "${git_cmd[@]}" restore --source=HEAD --staged --worktree -- "$filename"
-        printf 'Restored from HEAD: %s\n' "$output_file"
-        ;;
-esac
+    else
+        rm -f -- "$temp_file"
+        error "display file is unavailable: $output_file"
+        return 1
+    fi
+    if ! mv -- "$temp_file" "$path"; then
+        rm -f -- "$temp_file"
+        error "could not save profile: $name"
+        return 1
+    fi
+    chmod u+rw,go-w -- "$path"
+    printf 'Created writable profile: %s\n' "$name"
+    profile_switch "$name"
+}
+
+profile_menu() {
+    local choice name
+    require_command gum || return
+    while true; do
+        choice=$(gum choose \
+            "Show active profile" \
+            "List profiles" \
+            "Switch profile" \
+            "Create profile from current diff" \
+            "Toggle read/write" \
+            "Quit") || return 0
+        case "$choice" in
+            'Show active profile') profile_stat ;;
+            'List profiles') profile_list ;;
+            'Switch profile')
+                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum choose) || continue
+                profile_switch "$name"
+                ;;
+            'Create profile from current diff')
+                name=$(gum input --placeholder 'Profile name (e.g. laptop)') || continue
+                [[ -n "$name" ]] || continue
+                profile_create "$name"
+                ;;
+            'Toggle read/write')
+                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum choose) || continue
+                profile_toggle "$name"
+                ;;
+            Quit) return 0 ;;
+        esac
+    done
+}
+
+display_command() {
+    local action directory filename status
+    action=${1:-stat}
+    (( $# <= 1 )) || { usage >&2; return 2; }
+    [[ "$action" == stat || "$action" == reset ]] || { usage >&2; return 2; }
+    validate_output_path
+    directory=$(dirname -- "$output_file")
+    filename=${output_file##*/}
+    while [[ ! -d "$directory" ]]; do
+        [[ "$directory" != / ]] || { error "no existing parent directory for $output_file"; return 1; }
+        filename="${directory##*/}/$filename"
+        directory=$(dirname -- "$directory")
+    done
+    local -a git_cmd=(git --literal-pathspecs -C "$directory")
+
+    case "$action" in
+        stat)
+            status=$("${git_cmd[@]}" status --short --no-renames --untracked-files=all --ignored=matching -- "$filename")
+            if [[ -n "$status" ]]; then
+                printf '%s\n' "$status"
+            elif "${git_cmd[@]}" ls-files --error-unmatch -- "$filename" >/dev/null 2>&1; then
+                printf 'Clean: %s\n' "$output_file"
+            else
+                printf 'No Git entry: %s\n' "$output_file"
+            fi
+            ;;
+        reset)
+            if [[ -L "$output_file" ]]; then
+                local target target_dir target_file
+                target=$(readlink -- "$output_file")
+                if [[ "$target" == /* ]]; then
+                    target_dir=$(dirname -- "$target")
+                    target_file=$(basename -- "$target")
+                else
+                    target_dir=$(dirname -- "$output_file")/$(dirname -- "$target")
+                    target_file=$(basename -- "$target")
+                fi
+                local -a target_git=(git --literal-pathspecs -C "$target_dir")
+                if [[ $(" ${target_git[@]}" cat-file -t "HEAD:./$target_file" 2>/dev/null) != blob ]]; then
+                    # New, uncommitted profiles have no HEAD version to restore.
+                    error "profile has no committed version in HEAD: $target"
+                    return 1
+                fi
+                "${target_git[@]}" restore --source=HEAD --staged --worktree -- "$target_file"
+            else
+                if [[ $(" ${git_cmd[@]}" cat-file -t "HEAD:./$filename" 2>/dev/null) != blob ]]; then
+                    error "no file at this path in HEAD: $output_file"
+                    return 1
+                fi
+                "${git_cmd[@]}" restore --source=HEAD --staged --worktree -- "$filename"
+            fi
+            printf 'Restored from HEAD: %s\n' "$output_file"
+            ;;
+    esac
+}
+
+main() {
+    local command action
+    command=${1:-}
+    case "$command" in
+        help|-h)
+            (( $# == 1 )) || { usage >&2; return 2; }
+            usage
+            ;;
+        version|-v)
+            (( $# == 1 )) || { usage >&2; return 2; }
+            printf 'dux %s\n' "$VERSION"
+            ;;
+        display|-d)
+            shift
+            display_command "$@"
+            ;;
+        profile|profiles)
+            shift
+            validate_output_path
+            profile_context
+            action=${1:-menu}
+            case "$action" in
+                menu) (( $# == 0 )) || { usage >&2; return 2; }; profile_menu ;;
+                list) (( $# == 1 )) || { usage >&2; return 2; }; profile_list ;;
+                stat|show|current) (( $# == 1 )) || { usage >&2; return 2; }; profile_stat ;;
+                switch)
+                    shift
+                    if (( $# == 0 )); then
+                        require_command gum || return
+                        action=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum choose) || return 0
+                    else
+                        action=$1
+                    fi
+                    profile_switch "$action"
+                    ;;
+                create)
+                    shift
+                    if (( $# == 0 )); then
+                        require_command gum || return
+                        action=$(gum input --placeholder 'Profile name (e.g. laptop)') || return 0
+                    else
+                        action=$1
+                    fi
+                    [[ -n "$action" ]] || { error 'profile name is required'; return 2; }
+                    profile_create "$action"
+                    ;;
+                edit|toggle)
+                    shift
+                    action=${1:-$ACTIVE_PROFILE}
+                    (( $# <= 1 )) || { usage >&2; return 2; }
+                    profile_toggle "$action"
+                    ;;
+                *) usage >&2; return 2 ;;
+            esac
+            ;;
+        '')
+            (( $# == 0 )) || { usage >&2; return 2; }
+            validate_output_path
+            profile_context
+            profile_menu
+            ;;
+        *) usage >&2; return 2 ;;
+    esac
+}
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    main "$@"
+fi
