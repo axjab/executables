@@ -110,6 +110,29 @@ gum_confirm() {
         "Active profile: $ACTIVE_PROFILE — $1"
 }
 
+resolve_option() {
+    local input=$1 option
+    shift
+    local -a matches=()
+    for option in "$@"; do
+        [[ "$option" == "$input" ]] && {
+            printf '%s\n' "$option"
+            return 0
+        }
+        [[ "$option" == "$input"* ]] && matches+=("$option")
+    done
+    if (( ${#matches[@]} == 1 )); then
+        printf '%s\n' "${matches[0]}"
+        return 0
+    fi
+    if (( ${#matches[@]} > 1 )); then
+        error "ambiguous option '$input': ${matches[*]}"
+    else
+        error "unknown option: $input"
+    fi
+    return 2
+}
+
 profile_list() {
     local file name marker active
     active=$(basename -- "$(readlink -- "$output_file")")
@@ -382,6 +405,7 @@ main() {
             validate_output_path
             profile_context
             action=${1:-menu}
+            action=$(resolve_option "$action" menu ls stat show current switch new edit toggle remove rm rename mv) || return
             case "$action" in
                 menu) (( $# == 0 )) || { usage >&2; return 2; }; profile_menu ;;
                 ls) (( $# == 1 )) || { usage >&2; return 2; }; profile_list ;;
