@@ -92,7 +92,7 @@ profile_path() {
 profile_is_writable() {
     local mode
     mode=$(stat -c '%a' -- "$1") || return
-    (( (8#$mode & 0222) != 0 ))
+    (( (8#$mode & 0200) != 0 ))
 }
 
 gum_choose() {
@@ -189,17 +189,29 @@ profile_switch() {
 }
 
 profile_toggle() {
-    local name path mode
-    name=${1:-$ACTIVE_PROFILE}
-    path=$(profile_path "$name") || return
+    local path mode
+    path=$(profile_path "$ACTIVE_PROFILE") || return
     if profile_is_writable "$path"; then
-        chmod a-w -- "$path"
+        chmod u-w -- "$path"
         mode='READ-ONLY '
     else
-        chmod u+rw,go-w -- "$path"
+        chmod u+w -- "$path"
         mode='READ/WRITE'
     fi
-    printf '%s: %s\n' "$name" "$mode"
+    printf '%s: %s\n' "$ACTIVE_PROFILE" "$mode"
+}
+
+
+profile_edit() {
+    local path editor
+    local -a editor_cmd=()
+    path=$(profile_path "$ACTIVE_PROFILE") || return
+    chmod u+w -- "$path"
+    editor=${VISUAL:-${EDITOR:-vi}}
+    read -r -a editor_cmd <<< "$editor"
+    (( ${#editor_cmd[@]} > 0 )) || editor_cmd=(vi)
+    require_command "${editor_cmd[0]}" || return
+    "${editor_cmd[@]}" "$path"
 }
 
 profile_create() {
@@ -293,7 +305,8 @@ profile_menu() {
             "List profiles" \
             "Switch profile" \
             "Clone active profile" \
-            "Toggle read/write" \
+            "Toggle active profile read/write" \
+            "Edit active profile" \
             "Remove profile" \
             "Rename profile" \
             "Quit") || return 0
@@ -309,9 +322,11 @@ profile_menu() {
                 [[ -n "$name" ]] || continue
                 profile_create "$name"
                 ;;
-            'Toggle read/write')
-                name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
-                profile_toggle "$name"
+            'Toggle active profile read/write')
+                profile_toggle || continue
+                ;;
+            'Edit active profile')
+                profile_edit || continue
                 ;;
             'Remove profile')
                 name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
@@ -398,11 +413,15 @@ main() {
                     fi
                     profile_rename "$action" "$new_name"
                     ;;
-                edit|toggle)
+                toggle)
                     shift
-                    action=${1:-$ACTIVE_PROFILE}
-                    (( $# <= 1 )) || { usage >&2; return 2; }
-                    profile_toggle "$action"
+                    (( $# == 0 )) || { usage >&2; return 2; }
+                    profile_toggle
+                    ;;
+                edit)
+                    shift
+                    (( $# == 0 )) || { usage >&2; return 2; }
+                    profile_edit
                     ;;
                 *) usage >&2; return 2 ;;
             esac
