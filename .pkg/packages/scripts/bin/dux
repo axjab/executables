@@ -279,14 +279,14 @@ display_command() {
                     target_file=$(basename -- "$target")
                 fi
                 local -a target_git=(git --literal-pathspecs -C "$target_dir")
-                if [[ $(" ${target_git[@]}" cat-file -t "HEAD:./$target_file" 2>/dev/null) != blob ]]; then
+                if [[ $("${target_git[@]}" cat-file -t "HEAD:./$target_file" 2>/dev/null) != blob ]]; then
                     # New, uncommitted profiles have no HEAD version to restore.
                     error "profile has no committed version in HEAD: $target"
                     return 1
                 fi
                 "${target_git[@]}" restore --source=HEAD --staged --worktree -- "$target_file"
             else
-                if [[ $(" ${git_cmd[@]}" cat-file -t "HEAD:./$filename" 2>/dev/null) != blob ]]; then
+                if [[ $("${git_cmd[@]}" cat-file -t "HEAD:./$filename" 2>/dev/null) != blob ]]; then
                     error "no file at this path in HEAD: $output_file"
                     return 1
                 fi
