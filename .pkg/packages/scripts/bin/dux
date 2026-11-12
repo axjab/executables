@@ -292,13 +292,13 @@ profile_menu() {
                 ;;
             'Remove profile')
                 name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
-                profile_remove "$name"
+                profile_remove "$name" || continue
                 ;;
             'Rename profile')
                 name=$(find "$PROFILE_DIR" -maxdepth 1 -type f -name '*.kdl' -printf '%f\n' | sort | gum_choose) || continue
                 new_name=$(gum_input --placeholder "New name for $name") || continue
                 [[ -n "$new_name" ]] || continue
-                profile_rename "$name" "$new_name"
+                profile_rename "$name" "$new_name" || continue
                 ;;
             Quit) return 0 ;;
         esac
@@ -362,7 +362,7 @@ display_command() {
 }
 
 main() {
-    local command action
+    local command action new_name
     command=${1:-}
     case "$command" in
         help|-h)
