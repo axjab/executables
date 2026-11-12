@@ -85,10 +85,6 @@ normalize_profile_name() {
 profile_path() {
     local name
     name=$(normalize_profile_name "$1") || return
-    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.kdl$ ]] || {
-        error "invalid profile name: $name (use letters, numbers, dots, underscores or hyphens)"
-        return 1
-    }
     [[ -f "$PROFILE_DIR/$name" ]] || {
         error "profile not found: $name"
         return 1
@@ -217,7 +213,7 @@ profile_edit() {
     local path editor
     local -a editor_cmd=()
     path=$(profile_path "$ACTIVE_PROFILE") || return
-    chmod u+w -- "$path"
+    chmod u+rw -- "$path"
     editor=${VISUAL:-${EDITOR:-vi}}
     read -r -a editor_cmd <<< "$editor"
     (( ${#editor_cmd[@]} > 0 )) || editor_cmd=(vi)
